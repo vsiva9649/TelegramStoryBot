@@ -12,46 +12,90 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-@Table(name = "telegram_users")
+@Table(name = "telegram_users", indexes = {@Index(name = "idx_telegram_users_telegram_id", columnList = "telegramId"), @Index(name = "idx_telegram_users_username", columnList = "username")})
 public class TelegramUser {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Telegram User ID
+    // =========================================
+    // TELEGRAM USER ID
+    // =========================================
+
     @Column(unique = true, nullable = false)
     private Long telegramId;
 
-    // Chat ID
+    // =========================================
+    // CHAT ID
+    // =========================================
+
     @Column(nullable = false)
     private Long chatId;
 
-    // Username
+    // =========================================
+    // TELEGRAM PROFILE
+    // =========================================
+
     private String username;
 
-    // First Name
     private String firstName;
 
-    // Last Name
     private String lastName;
 
-    // Language
     private String languageCode;
 
-    // Telegram Premium User
     private Boolean premiumUser;
 
-    // Is Telegram Bot
     private Boolean bot;
 
-    // First Joined Time
+    // =========================================
+    // USER ACTIVITY
+    // =========================================
+
+    // First time user entered StoryBot
+    @Column(nullable = false)
     private LocalDateTime joinedAt;
 
-    // Last Active Time
+    // Last interaction with StoryBot
+    @Column(nullable = false)
     private LocalDateTime lastActiveAt;
+
+    // =========================================
+    // ROLE
+    // =========================================
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private UserRole role;
+
+    // =========================================
+    // ENTITY DEFAULTS
+    // =========================================
+
+    @PrePersist
+    public void prePersist() {
+
+        LocalDateTime now = LocalDateTime.now();
+
+        if (joinedAt == null) {
+            joinedAt = now;
+        }
+
+        if (lastActiveAt == null) {
+            lastActiveAt = now;
+        }
+
+        if (role == null) {
+            role = UserRole.USER;
+        }
+
+        if (premiumUser == null) {
+            premiumUser = false;
+        }
+
+        if (bot == null) {
+            bot = false;
+        }
+    }
 }

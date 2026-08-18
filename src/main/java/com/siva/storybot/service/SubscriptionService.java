@@ -5,16 +5,19 @@ import com.siva.storybot.entity.TelegramUser;
 import com.siva.storybot.enums.BillingType;
 import com.siva.storybot.enums.SubscriptionPlan;
 import com.siva.storybot.enums.SubscriptionStatus;
+import com.siva.storybot.enums.UserRole;
 import com.siva.storybot.repository.SubscriptionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 @Slf4j
 @Service
@@ -23,38 +26,145 @@ public class SubscriptionService {
 
     private final SubscriptionRepository subscriptionRepository;
 
+    private final GlobalTrialService globalTrialService;
+
     // =========================================
-    // CHECK ACTIVE SUBSCRIPTION
+    // COMPLETE ACCESS CHECK
+    //
+    // PRIORITY:
+    //
+    // 1. OWNER / ADMIN
+    // 2. ACTIVE NORMAL SUBSCRIPTION
+    // 3. MANUAL FREE TRIAL SUBSCRIPTION
+    // 4. GLOBAL FREE TRIAL
+    // 5. DENY
     // =========================================
 
+    public boolean hasAccess(TelegramUser telegramUser) {
+
+        try {
+
+            if (telegramUser == null) {
+
+                return false;
+            }
+
+            // =====================================
+            // OWNER / ADMIN BYPASS
+            // =====================================
+
+            if (telegramUser.getRole() == UserRole.OWNER || telegramUser.getRole() == UserRole.ADMIN) {
+
+                return true;
+            }
+
+            // =====================================
+            // NORMAL / MANUAL SUBSCRIPTION CHECK
+            // =====================================
+
+            if (hasActiveSubscription(telegramUser)) {
+
+                return true;
+            }
+
+            // =====================================
+            // GLOBAL FREE TRIAL CHECK
+            // =====================================
+
+            return globalTrialService.hasGlobalTrialAccess(telegramUser);
+
+        } catch (Exception e) {
+
+            log.error("User access validation failed telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
+
+            return false;
+        }
+    }
+
+    // =========================================
+    // CHECK ACTIVE NORMAL SUBSCRIPTION
+    //
+    // Includes:
+    // FREE/manual trial
+    // MONTHLY
+    // YEARLY
+    // LIFETIME
+    // =========================================
+
+    @Transactional
     public boolean hasActiveSubscription(TelegramUser telegramUser) {
 
         try {
 
-            Subscription subscription = subscriptionRepository.findByTelegramUser(telegramUser).orElse(null);
-
-            if (subscription == null) {
+            if (telegramUser == null) {
 
                 return false;
             }
 
-            if (Boolean.FALSE.equals(subscription.getPaymentDone())) {
+            Optional<Subscription> optionalSubscription = subscriptionRepository.findTopByTelegramUserAndStatusOrderByExpiryDateDesc(telegramUser, SubscriptionStatus.ACTIVE);
+
+            if (optionalSubscription.isEmpty()) {
 
                 return false;
             }
+
+            Subscription subscription = optionalSubscription.get();
+
+            // =====================================
+            // BASIC VALIDATION
+            // =====================================
 
             if (subscription.getStatus() != SubscriptionStatus.ACTIVE) {
 
                 return false;
             }
 
-            if (subscription.getExpiryDate() != null && subscription.getExpiryDate().isBefore(LocalDate.now())) {
+            // =====================================
+            // PAYMENT VALIDATION
+            //
+            // FREE TRIAL:
+            // paymentDone can be false
+            //
+            // PAID PLAN:
+            // paymentDone must be true
+            // =====================================
 
-                subscription.setStatus(SubscriptionStatus.EXPIRED);
+            boolean isTrial = Boolean.TRUE.equals(subscription.getTrial()) || subscription.getPlan() == SubscriptionPlan.FREE;
 
-                subscription.setUpdatedAt(LocalDateTime.now());
+            if (!isTrial && !Boolean.TRUE.equals(subscription.getPaymentDone())) {
 
-                subscriptionRepository.save(subscription);
+                log.warn("Paid subscription payment incomplete telegramId={} subscriptionId={}", telegramUser.getTelegramId(), subscription.getId());
+
+                return false;
+            }
+
+            // =====================================
+            // EXPIRY VALIDATION
+            // =====================================
+
+            if (subscription.getExpiryDate() == null) {
+
+                expireSubscriptionRecord(subscription);
+
+                return false;
+            }
+
+            LocalDate today = LocalDate.now();
+
+            // expiry date itself is allowed
+            //
+            // Example:
+            // expiry = 20-Aug
+            // today  = 20-Aug
+            //
+            // ACTIVE
+            //
+            // today = 21-Aug
+            // EXPIRED
+
+            if (today.isAfter(subscription.getExpiryDate())) {
+
+                expireSubscriptionRecord(subscription);
 
                 return false;
             }
@@ -63,78 +173,182 @@ public class SubscriptionService {
 
         } catch (Exception e) {
 
-            log.error("Subscription validation failed", e);
+            log.error("Subscription validation failed telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
 
             return false;
         }
     }
 
     // =========================================
-    // CREATE OR UPDATE SUBSCRIPTION
+    // CREATE NEW SUBSCRIPTION
+    //
+    // IMPORTANT:
+    //
+    // We create a NEW ROW.
+    //
+    // Don't overwrite previous subscription
+    // because we need subscription history.
     // =========================================
 
+    @Transactional
     public Subscription createOrUpdateSubscription(TelegramUser telegramUser, SubscriptionPlan plan, BillingType billingType, BigDecimal amount, Integer validityDays) {
 
         try {
 
-            Subscription subscription = subscriptionRepository.findByTelegramUser(telegramUser).orElse(null);
+            // =====================================
+            // VALIDATION
+            // =====================================
+
+            if (telegramUser == null) {
+
+                throw new IllegalArgumentException("Telegram user is required");
+            }
+
+            if (plan == null) {
+
+                throw new IllegalArgumentException("Subscription plan is required");
+            }
+
+            if (billingType == null) {
+
+                throw new IllegalArgumentException("Billing type is required");
+            }
+
+            if (validityDays == null || validityDays <= 0) {
+
+                throw new IllegalArgumentException("Validity days must be greater than 0");
+            }
+
+            // =====================================
+            // EXPIRE CURRENT ACTIVE SUBSCRIPTION
+            //
+            // Then create fresh history row.
+            // =====================================
+
+            expireCurrentActiveSubscription(telegramUser);
 
             LocalDate startDate = LocalDate.now();
 
             LocalDate expiryDate = startDate.plusDays(validityDays);
 
-            // =====================================
-            // NEW SUBSCRIPTION
-            // =====================================
-
-            if (subscription == null) {
-
-                subscription = Subscription.builder().telegramUser(telegramUser).createdAt(LocalDateTime.now()).build();
-            }
+            boolean trial = plan == SubscriptionPlan.FREE;
 
             // =====================================
-            // UPDATE SUBSCRIPTION
+            // PAYMENT STATUS
+            //
+            // FREE trial:
+            // paymentDone = false
+            //
+            // paid plans:
+            // paymentDone = true
             // =====================================
 
-            subscription.setPlan(plan);
+            boolean paymentDone = !trial;
 
-            subscription.setBillingType(billingType);
+            BigDecimal finalAmount = amount != null ? amount : BigDecimal.ZERO;
 
-            subscription.setAmount(amount);
+            Subscription subscription = Subscription.builder()
 
-            subscription.setPaymentDone(true);
+                    .telegramUser(telegramUser)
 
-            subscription.setTrial(plan == SubscriptionPlan.FREE);
+                    .plan(plan)
 
-            subscription.setStatus(SubscriptionStatus.ACTIVE);
+                    .billingType(billingType)
 
-            subscription.setStartDate(startDate);
+                    .amount(finalAmount)
 
-            subscription.setExpiryDate(expiryDate);
+                    .paymentDone(paymentDone)
 
-            subscription.setUpdatedAt(LocalDateTime.now());
+                    .trial(trial)
+
+                    .status(SubscriptionStatus.ACTIVE)
+
+                    .startDate(startDate)
+
+                    .expiryDate(expiryDate)
+
+                    .createdAt(LocalDateTime.now())
+
+                    .updatedAt(LocalDateTime.now())
+
+                    .build();
 
             Subscription savedSubscription = subscriptionRepository.save(subscription);
 
-            log.info("Subscription updated telegramId={}", telegramUser.getTelegramId());
+            log.info("""
+                    Subscription created
+                    telegramId={}
+                    subscriptionId={}
+                    plan={}
+                    trial={}
+                    paymentDone={}
+                    startDate={}
+                    expiryDate={}
+                    """, telegramUser.getTelegramId(), savedSubscription.getId(), savedSubscription.getPlan(), savedSubscription.getTrial(), savedSubscription.getPaymentDone(), savedSubscription.getStartDate(), savedSubscription.getExpiryDate());
 
             return savedSubscription;
 
         } catch (Exception e) {
 
-            log.error("createOrUpdateSubscription failed", e);
+            log.error("createOrUpdateSubscription failed telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
 
             throw e;
         }
     }
 
     // =========================================
-    // MANUAL EXPIRE
+    // EXPIRE CURRENT ACTIVE SUBSCRIPTION
     // =========================================
 
+    @Transactional
     public void expireSubscription(TelegramUser telegramUser) {
 
-        Subscription subscription = subscriptionRepository.findByTelegramUser(telegramUser).orElse(null);
+        try {
+
+            if (telegramUser == null) {
+
+                return;
+            }
+
+            Optional<Subscription> optional = subscriptionRepository.findTopByTelegramUserAndStatusOrderByExpiryDateDesc(telegramUser, SubscriptionStatus.ACTIVE);
+
+            if (optional.isEmpty()) {
+
+                log.info("No active subscription found telegramId={}", telegramUser.getTelegramId());
+
+                return;
+            }
+
+            expireSubscriptionRecord(optional.get());
+
+            log.info("Subscription manually expired telegramId={}", telegramUser.getTelegramId());
+
+        } catch (Exception e) {
+
+            log.error("Manual subscription expiry failed telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
+
+            throw e;
+        }
+    }
+
+    // =========================================
+    // INTERNAL:
+    // EXPIRE CURRENT ACTIVE SUBSCRIPTION
+    //
+    // Used before creating another subscription
+    // =========================================
+
+    private void expireCurrentActiveSubscription(TelegramUser telegramUser) {
+
+        subscriptionRepository.findTopByTelegramUserAndStatusOrderByExpiryDateDesc(telegramUser, SubscriptionStatus.ACTIVE).ifPresent(this::expireSubscriptionRecord);
+    }
+
+    // =========================================
+    // INTERNAL:
+    // EXPIRE SINGLE SUBSCRIPTION
+    // =========================================
+
+    private void expireSubscriptionRecord(Subscription subscription) {
 
         if (subscription == null) {
 
@@ -146,41 +360,49 @@ public class SubscriptionService {
         subscription.setUpdatedAt(LocalDateTime.now());
 
         subscriptionRepository.save(subscription);
-
-        log.info("Subscription expired telegramId={}", telegramUser.getTelegramId());
     }
 
     // =========================================
     // AUTO EXPIRE SCHEDULER
+    //
     // EVERYDAY 12:00 AM
     // =========================================
 
     @Scheduled(cron = "0 0 0 * * *")
+    @Transactional
     public void autoExpireSubscriptions() {
 
         try {
 
             log.info("Auto subscription expiry scheduler started");
 
-            List<Subscription> subscriptions = subscriptionRepository.findByStatusAndExpiryDateBefore(SubscriptionStatus.ACTIVE, LocalDate.now());
+            LocalDate today = LocalDate.now();
 
-            if (subscriptions.isEmpty()) {
+            List<Subscription> subscriptions = subscriptionRepository.findByStatusAndExpiryDateBefore(SubscriptionStatus.ACTIVE, today);
+
+            if (subscriptions == null || subscriptions.isEmpty()) {
 
                 log.info("No expired subscriptions found");
 
                 return;
             }
 
+            LocalDateTime now = LocalDateTime.now();
+
             for (Subscription subscription : subscriptions) {
 
                 subscription.setStatus(SubscriptionStatus.EXPIRED);
 
-                subscription.setUpdatedAt(LocalDateTime.now());
+                subscription.setUpdatedAt(now);
 
-                subscriptionRepository.save(subscription);
-
-                log.info("Subscription auto expired telegramId={}", subscription.getTelegramUser().getTelegramId());
+                log.info("Subscription auto expired telegramId={} subscriptionId={} expiryDate={}", subscription.getTelegramUser().getTelegramId(), subscription.getId(), subscription.getExpiryDate());
             }
+
+            // =====================================
+            // SAVE IN ONE BATCH
+            // =====================================
+
+            subscriptionRepository.saveAll(subscriptions);
 
             log.info("Auto subscription expiry completed count={}", subscriptions.size());
 
@@ -190,8 +412,26 @@ public class SubscriptionService {
         }
     }
 
+    // =========================================
+    // SUBSCRIPTION HISTORY
+    // =========================================
+
     public List<Subscription> getUserSubscriptionHistory(TelegramUser telegramUser) {
 
-        return subscriptionRepository.findByTelegramUserOrderByCreatedAtDesc(telegramUser);
+        try {
+
+            if (telegramUser == null) {
+
+                return List.of();
+            }
+
+            return subscriptionRepository.findByTelegramUserOrderByCreatedAtDesc(telegramUser);
+
+        } catch (Exception e) {
+
+            log.error("Failed to get subscription history telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
+
+            return List.of();
+        }
     }
 }

@@ -38,15 +38,7 @@ public class TelegramCommandService {
         log.info("TELEGRAM COMMAND SETUP STARTED");
         log.info("=========================================");
 
-        // =====================================
-        // DEFAULT USER COMMANDS
-        // =====================================
-
         registerDefaultCommandsSafely();
-
-        // =====================================
-        // OWNER COMMANDS
-        // =====================================
 
         registerOwnerCommandsSafely();
 
@@ -101,21 +93,9 @@ public class TelegramCommandService {
 
                 new BotCommand("help", "Help and support"));
 
-        // =====================================
-        // VALIDATE BEFORE TELEGRAM API CALL
-        // =====================================
-
         validateCommands("DEFAULT", userCommands);
 
-        // =====================================
-        // BUILD COMMAND REQUEST
-        // =====================================
-
         SetMyCommands request = buildDefaultCommands(userCommands);
-
-        // =====================================
-        // REGISTER COMMANDS
-        // =====================================
 
         storyTelegramBot.execute(request);
 
@@ -132,18 +112,10 @@ public class TelegramCommandService {
 
         log.info("Registering owner commands ownerId={}", ownerId);
 
-        // =====================================
-        // OWNER CONFIG VALIDATION
-        // =====================================
-
         if (ownerId == null) {
 
             throw new IllegalStateException("Telegram ownerId is not configured");
         }
-
-        // =====================================
-        // OWNER COMMAND LIST
-        // =====================================
 
         List<BotCommand> ownerCommands = List.of(
 
@@ -174,6 +146,14 @@ public class TelegramCommandService {
                 new BotCommand("updateuser", "Update role or subscription"),
 
                 // =================================
+                // GLOBAL FREE TRIAL
+                // =================================
+
+                new BotCommand("trailonsubscription", "Enable global 7-day free trial"),
+
+                new BotCommand("trailoffsubscription", "Disable global free trial"),
+
+                // =================================
                 // STORY MANAGEMENT
                 // =================================
 
@@ -184,26 +164,14 @@ public class TelegramCommandService {
                 new BotCommand("deleteinactivestory", "Delete inactive stories"),
 
                 // =================================
-                // HELP / USAGE
+                // HELP
                 // =================================
 
                 new BotCommand("usage", "View owner usage guide"));
 
-        // =====================================
-        // VALIDATE BEFORE TELEGRAM API CALL
-        // =====================================
-
         validateCommands("OWNER", ownerCommands);
 
-        // =====================================
-        // BUILD OWNER COMMAND REQUEST
-        // =====================================
-
         SetMyCommands request = buildOwnerCommands(ownerCommands);
-
-        // =====================================
-        // REGISTER OWNER COMMANDS
-        // =====================================
 
         storyTelegramBot.execute(request);
 
@@ -216,18 +184,10 @@ public class TelegramCommandService {
 
     private void validateCommands(String scope, List<BotCommand> commands) {
 
-        // =====================================
-        // LIST VALIDATION
-        // =====================================
-
         if (commands == null || commands.isEmpty()) {
 
             throw new IllegalArgumentException("Telegram command list cannot be empty scope=" + scope);
         }
-
-        // =====================================
-        // EACH COMMAND VALIDATION
-        // =====================================
 
         for (BotCommand botCommand : commands) {
 
@@ -240,49 +200,30 @@ public class TelegramCommandService {
 
             String description = botCommand.getDescription();
 
-            // =====================================
-            // TELEGRAM COMMAND RULE
-            //
-            // Allowed:
+            // Telegram supports lowercase:
             // a-z
             // 0-9
             // _
             //
             // Length:
-            // 1 - 32
-            //
-            // NOT allowed:
-            // /
-            // uppercase letters
-            // spaces
-            // hyphens
-            // special characters
-            // =====================================
+            // 1-32
 
             if (command == null || !command.matches("^[a-z0-9_]{1,32}$")) {
 
                 throw new IllegalArgumentException("Invalid Telegram command" + " scope=" + scope + " command=" + command);
             }
 
-            // =====================================
-            // DESCRIPTION VALIDATION
-            // =====================================
-
             if (description == null || description.isBlank()) {
 
                 throw new IllegalArgumentException("Telegram command description cannot be empty" + " command=" + command);
             }
-
-            // =====================================
-            // DESCRIPTION LENGTH VALIDATION
-            // =====================================
 
             if (description.length() > 256) {
 
                 throw new IllegalArgumentException("Telegram command description too long" + " command=" + command);
             }
 
-            log.debug("Telegram command validation passed" + " scope={}" + " command={}", scope, command);
+            log.debug("Telegram command validation passed scope={} command={}", scope, command);
         }
     }
 
@@ -294,17 +235,7 @@ public class TelegramCommandService {
 
         SetMyCommands setMyCommands = new SetMyCommands();
 
-        // =====================================
-        // COMMAND LIST
-        // =====================================
-
         setMyCommands.setCommands(commands);
-
-        // =====================================
-        // DEFAULT SCOPE
-        //
-        // ALL USERS CAN SEE
-        // =====================================
 
         setMyCommands.setScope(new BotCommandScopeDefault());
 
@@ -319,18 +250,7 @@ public class TelegramCommandService {
 
         SetMyCommands setMyCommands = new SetMyCommands();
 
-        // =====================================
-        // COMMAND LIST
-        // =====================================
-
         setMyCommands.setCommands(commands);
-
-        // =====================================
-        // OWNER CHAT SCOPE
-        //
-        // ONLY OWNER CHAT GETS
-        // OWNER COMMAND MENU
-        // =====================================
 
         setMyCommands.setScope(
 

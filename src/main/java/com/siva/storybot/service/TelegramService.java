@@ -30,6 +30,9 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKe
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +51,8 @@ public class TelegramService {
     private final TelegramUserService telegramUserService;
 
     private final SubscriptionService subscriptionService;
+
+    private final GlobalTrialService globalTrialService;
 
     private final GroqService groqService;
 
@@ -109,35 +114,45 @@ public class TelegramService {
         }
     }
 
-    private void sendSubscriptionRequiredMessage(TelegramLongPollingBot bot, Long chatId, Integer userMessageId) {
+    private void sendSubscriptionRequiredMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Integer userMessageId) {
 
         try {
 
-            Message botMessage = sendMessage(bot, chatId, """
+            Message botMessage = sendMessage(
+                    bot,
+                    chatId,
+                    """
                     🔒 Subscription Required
-                    
-                    Welcome to Story Bot 📚
-                    
-                    To access stories you need
-                    an active subscription.
-                    
-                    👑 Contact Admin
-                    
-                    👤 Username:
-                    @%s
-                    
-                    🆔 Admin ID:
-                    %s
-                    """.formatted(telegramConfig.getOwnerUsername(), telegramConfig.getOwnerId()));
+    
+                    Your free access or subscription
+                    is currently unavailable.
+    
+                    To continue listening to stories,
+                    please activate a subscription.
+    
+                    👑 Please Contact Admin
+                    """
+            );
 
             if (userMessageId != null) {
 
-                autoDeleteMessages(bot, chatId, userMessageId, botMessage.getMessageId());
+                autoDeleteMessages(
+                        bot,
+                        chatId,
+                        userMessageId,
+                        botMessage.getMessageId()
+                );
             }
 
         } catch (Exception e) {
 
-            log.error("sendSubscriptionRequiredMessage failed", e);
+            log.error(
+                    "sendSubscriptionRequiredMessage failed",
+                    e
+            );
         }
     }
 
@@ -339,10 +354,17 @@ public class TelegramService {
             }
 
             // =====================================
-            // SUBSCRIPTION CHECK
+            // COMPLETE ACCESS CHECK
+            //
+            // OWNER / ADMIN
+            // MANUAL FREE TRIAL
+            // MONTHLY
+            // YEARLY
+            // LIFETIME
+            // GLOBAL FREE TRIAL
             // =====================================
 
-            boolean active = subscriptionService.hasActiveSubscription(telegramUser);
+            boolean active = subscriptionService.hasAccess(telegramUser);
 
             Integer userMessageId = message.getMessageId();
 
@@ -419,6 +441,12 @@ public class TelegramService {
             // RANGE SEARCH (e.g. 20-50)
             // =====================================
 
+            // =====================================
+// CUSTOM RANGE SEARCH
+// MAX 50 EPISODES
+// DIRECT AUDIO SEND
+// =====================================
+
             if (text.matches("\\d+\\s*-\\s*\\d+")) {
 
                 Long storyId = searchStoryContext.get(chatId);
@@ -426,11 +454,11 @@ public class TelegramService {
                 if (storyId == null) {
 
                     sendMessage(bot, chatId, """
-                            ❌ Search Context Not Found
-                            
-                            Please open a story first,
-                            then click 🔍 Search.
-                            """);
+                ❌ Search Context Not Found
+
+                Please open a story first,
+                then click 🔍 Search.
+                """);
 
                     return;
                 }
@@ -441,12 +469,69 @@ public class TelegramService {
 
                 int end = Integer.parseInt(split[1].trim());
 
-                if (start > end) {
+                // =====================================
+                // VALIDATE START / END
+                // =====================================
 
-                    sendMessage(bot, chatId, "❌ Invalid range. Example: 20-50");
+                if (start <= 0 || end <= 0) {
+
+                    sendMessage(bot, chatId, """
+                ❌ Invalid Episode Range
+
+                Episode numbers must be
+                greater than 0.
+
+                Example:
+
+                20-50
+                """);
 
                     return;
                 }
+
+                if (start > end) {
+
+                    sendMessage(bot, chatId, """
+                ❌ Invalid Range
+
+                Start episode cannot be
+                greater than end episode.
+
+                Example:
+
+                20-50
+                """);
+
+                    return;
+                }
+
+                // =====================================
+                // MAXIMUM 50 EPISODES
+                // =====================================
+
+                int requestedCount = end - start + 1;
+
+                if (requestedCount > 50) {
+
+                    sendMessage(bot, chatId, """
+                ❌ Search Range Too Large
+
+                Maximum 50 episodes
+                allowed per search.
+
+                Examples:
+
+                1-50
+                51-100
+                101-150
+                """);
+
+                    return;
+                }
+
+                // =====================================
+                // GET STORY
+                // =====================================
 
                 Story story = storyService.getStoryById(storyId);
 
@@ -459,8 +544,24 @@ public class TelegramService {
                     return;
                 }
 
-                showEpisodesByRange(bot, chatId, story, start, end);
+                // =====================================
+                // SEND AUDIO DIRECTLY
+                // =====================================
+
+                sendEpisodesByRange(
+                        bot,
+                        chatId,
+                        story,
+                        start,
+                        end
+                );
+
+                // =====================================
+                // REMOVE SEARCH CONTEXT
+                // =====================================
+
                 searchStoryContext.remove(chatId);
+
                 return;
             }
 
@@ -482,6 +583,20 @@ public class TelegramService {
 
         try {
 
+            TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
+
+            String trialInfo = "";
+
+            if (user != null && !subscriptionService.hasActiveSubscription(user) && globalTrialService.hasGlobalTrialAccess(user)) {
+
+                trialInfo = globalTrialService.getUserTrialExpiry(user).map(expiry -> """
+                        
+                        🎁 Free Trial Active
+                        ⏳ Valid Until:
+                        %s
+                        """.formatted(expiry)).orElse("");
+            }
+
             SendMessage sendMessage = new SendMessage();
 
             sendMessage.setChatId(String.valueOf(chatId));
@@ -492,11 +607,8 @@ public class TelegramService {
                     📚 Your Story Adventure Starts Here
                     
                     Select your option from below 👇
-                    """);
-
-            // =====================================
-            // FLOWER KEYBOARD
-            // =====================================
+                    %s
+                    """.formatted(trialInfo));
 
             ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
 
@@ -596,30 +708,35 @@ public class TelegramService {
         }
     }
 
-    private void showHelpMenu(TelegramLongPollingBot bot, Long chatId) {
+    private void showHelpMenu(
+            TelegramLongPollingBot bot,
+            Long chatId) {
 
         try {
 
-            sendMessage(bot, chatId, """
-                    ☎️ CONTACT US
-                    
-                    👑 Admin :
-                    @%s
-                    
-                    🆔 Admin ID :
-                    %s
-                    
-                    💬 Contact for:
-                    
+            sendMessage(
+                    bot,
+                    chatId,
+                    """
+                    ☎️ HELP & SUPPORT
+    
+                    👑 Please Contact Admin
+    
+                    💬 Contact Admin for:
+    
                     • Subscription
                     • Support
                     • Episode Issues
                     • Story Requests
-                    """.formatted(telegramConfig.getOwnerUsername(), telegramConfig.getOwnerId()));
+                    """
+            );
 
         } catch (Exception e) {
 
-            log.error("showHelpMenu failed", e);
+            log.error(
+                    "showHelpMenu failed",
+                    e
+            );
         }
     }
 
@@ -773,19 +890,23 @@ public class TelegramService {
             TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
 
             // =====================================
-            // OWNER BYPASS
+            // COMPLETE CALLBACK ACCESS CHECK
             // =====================================
 
-            if (user != null && user.getRole() != UserRole.OWNER) {
+            if (user == null) {
 
-                boolean active = subscriptionService.hasActiveSubscription(user);
+                sendSubscriptionRequiredMessage(bot, chatId, messageId);
 
-                if (!active) {
+                return;
+            }
 
-                    sendSubscriptionRequiredMessage(bot, chatId, messageId);
+            boolean active = subscriptionService.hasAccess(user);
 
-                    return;
-                }
+            if (!active) {
+
+                sendSubscriptionRequiredMessage(bot, chatId, messageId);
+
+                return;
             }
 
             String data = callbackQuery.getData();
@@ -967,20 +1088,43 @@ public class TelegramService {
             // SEARCH HINT
             // =====================================
 
+            // =====================================
+// SEARCH HINT
+// =====================================
+
             if (data.startsWith("search_")) {
 
-                Long storyId = Long.parseLong(data.replace("search_", ""));
+                Long storyId =
+                        Long.parseLong(
+                                data.replace("search_", "")
+                        );
 
-                searchStoryContext.put(chatId, storyId);
+                searchStoryContext.put(
+                        chatId,
+                        storyId
+                );
 
-                sendMessage(bot, chatId, """
+                sendMessage(
+                        bot,
+                        chatId,
+                        """
                         🔍 Episode Search
-                        
-                        Type a range in chat:
-                        
-                        20-50
-                        100-120
-                        """);
+            
+                        Enter episode range:
+            
+                        Examples:
+            
+                        1-50
+                        51-100
+                        120-150
+            
+                        ⚠️ Maximum 50 episodes
+                        allowed per search.
+            
+                        🎧 Audio files will be
+                        sent directly.
+                        """
+                );
 
                 return;
             }
@@ -1010,7 +1154,7 @@ public class TelegramService {
 
         log.info("Handling owner command text={}", text);
 
-        String lowerText = text.toLowerCase();
+        String lowerText = text.toLowerCase().trim();
 
         String cleanedText = text.replace("@", "");
 
@@ -1041,34 +1185,46 @@ public class TelegramService {
                     
                     📦 Episode Pack System
                        Episodes grouped in packs
-                       Easy navigation (EP 1-10, 11-20)
+                       Easy navigation
                     
                     🔍 Episode Search
-                       Users type range to search
-                       Example: 20-50
+                       Example:
+                       20-50
                     
                     💳 Subscription System
-                       FREE / MONTHLY / YEARLY / LIFETIME
-                       plans supported
+                       FREE
+                       MONTHLY
+                       YEARLY
+                       LIFETIME
+                    
+                    🌍 Global Free Trial
+                       Enable free access for
+                       all eligible users
                     
                     🤖 AI Intent Detection
-                       Owner commands via natural language
                        Powered by Groq AI
                     
                     ━━━━━━━━━━━━━━
                     👑 OWNER COMMANDS
                     ━━━━━━━━━━━━━━
                     
-                    /stories   → View all stories
-                    /usage     → Full command guide
+                    /stories
+                    /usage
+                    
+                    /trailonsubscription 2026-08-31
+                    
+                    /trailoffsubscription
                     
                     ━━━━━━━━━━━━━━
                     ⚡ QUICK ACTIONS
                     ━━━━━━━━━━━━━━
                     
                     show users
+                    
                     trial @username
+                    
                     activate @username monthly
+                    
                     history @username
                     """);
 
@@ -1081,11 +1237,44 @@ public class TelegramService {
                     👑 OWNER USAGE GUIDE
                     
                     ━━━━━━━━━━━━━━
+                    🌍 GLOBAL FREE TRIAL
+                    ━━━━━━━━━━━━━━
+                    
+                    Enable:
+                    
+                    /trailonsubscription 2026-08-31
+                    
+                    Disable:
+                    
+                    /trailoffsubscription
+                    
+                    Global trial rules:
+                    
+                    • Maximum 7 days per user
+                    
+                    • Existing users start from
+                      global campaign start time
+                    
+                    • New users start from
+                      their joinedAt time
+                    
+                    • User trial never exceeds
+                      global campaign end date
+                    
+                    • Paid subscriptions continue
+                      independently
+                    
+                    • Manual user trials continue
+                      independently
+                    
+                    ━━━━━━━━━━━━━━
                     👥 USERS
                     ━━━━━━━━━━━━━━
                     
                     users
+                    
                     show users
+                    
                     get all users
                     
                     ━━━━━━━━━━━━━━
@@ -1103,7 +1292,7 @@ public class TelegramService {
                     make admin @username
                     
                     ━━━━━━━━━━━━━━
-                    🎁 FREE TRIAL
+                    🎁 INDIVIDUAL FREE TRIAL
                     ━━━━━━━━━━━━━━
                     
                     trial @username
@@ -1151,6 +1340,8 @@ public class TelegramService {
                     /stories
                     
                     /syncstories
+                    
+                    /deleteinactivestory
                     """);
 
             return;
@@ -1181,6 +1372,182 @@ public class TelegramService {
             return;
         }
 
+
+        // =====================================
+        // GLOBAL FREE TRIAL ON
+        //
+        // Example:
+        //
+        // /trailonsubscription 2026-08-31
+        // =====================================
+
+        if (lowerText.startsWith("/trailonsubscription")) {
+
+            // =====================================
+            // OWNER ONLY
+            // =====================================
+
+            if (!chatId.equals(telegramConfig.getOwnerId())) {
+
+                sendMessage(bot, chatId, """
+                        ❌ Access Denied
+                        
+                        Only Bot Owner can enable
+                        Global Free Trial.
+                        """);
+
+                return;
+            }
+
+            String[] commandParts = text.trim().split("\\s+");
+
+            // =====================================
+            // REQUIRED:
+            //
+            // command + endDate
+            // =====================================
+
+            if (commandParts.length != 2) {
+
+                sendMessage(bot, chatId, """
+                        ❌ Invalid Command
+                        
+                        Usage:
+                        
+                        /trailonsubscription 2026-08-31
+                        
+                        📅 Date format:
+                        
+                        yyyy-MM-dd
+                        """);
+
+                return;
+            }
+
+            try {
+
+                LocalDate endDate = LocalDate.parse(commandParts[1]);
+
+                // campaign valid until
+                // end of selected day
+
+                LocalDateTime endDateTime = endDate.atTime(23, 59, 59);
+
+                var globalTrial = globalTrialService.enableGlobalTrial(endDateTime, chatId);
+
+                sendMessage(bot, chatId, """
+                        ✅ GLOBAL FREE TRIAL ENABLED
+                        
+                        🎁 Trial Per User:
+                        %d Days
+                        
+                        📅 Campaign Start:
+                        %s
+                        
+                        ⏳ Campaign End:
+                        %s
+                        
+                        ━━━━━━━━━━━━━━
+                        
+                        👥 Existing Users
+                        
+                        Trial starts from
+                        campaign start time.
+                        
+                        🆕 New Users
+                        
+                        Trial starts from
+                        user joinedAt time.
+                        
+                        ⚠️ User trial will never
+                        exceed campaign end date.
+                        
+                        ✅ Paid subscriptions continue
+                        with normal validity.
+                        """.formatted(globalTrial.getTrialDays(),
+
+                        globalTrial.getStartDate(),
+
+                        globalTrial.getEndDate()));
+
+            } catch (DateTimeParseException e) {
+
+                sendMessage(bot, chatId, """
+                        ❌ Invalid Date Format
+                        
+                        Correct example:
+                        
+                        /trailonsubscription 2026-08-31
+                        """);
+
+            } catch (IllegalArgumentException e) {
+
+                sendMessage(bot, chatId, """
+                        ❌ Cannot Enable Global Trial
+                        
+                        %s
+                        """.formatted(e.getMessage()));
+            }
+
+            return;
+        }
+
+        // =====================================
+        // GLOBAL FREE TRIAL OFF
+        // =====================================
+
+        if (lowerText.equals("/trailoffsubscription")) {
+
+            if (!chatId.equals(telegramConfig.getOwnerId())) {
+
+                sendMessage(bot, chatId, """
+                        ❌ Access Denied
+                        
+                        Only Bot Owner can disable
+                        Global Free Trial.
+                        """);
+
+                return;
+            }
+
+            boolean disabled = globalTrialService.disableGlobalTrial();
+
+            if (!disabled) {
+
+                sendMessage(bot, chatId, """
+                        ℹ️ GLOBAL FREE TRIAL
+                        
+                        No active global free
+                        trial is currently running.
+                        """);
+
+                return;
+            }
+
+            sendMessage(bot, chatId, """
+                    ⛔ GLOBAL FREE TRIAL DISABLED
+                    
+                    Global free access has stopped.
+                    
+                    ✅ Monthly subscriptions
+                    continue normally.
+                    
+                    ✅ Yearly subscriptions
+                    continue normally.
+                    
+                    ✅ Lifetime subscriptions
+                    continue normally.
+                    
+                    ✅ Individual manual trials
+                    continue until their own expiry.
+                    
+                    🔒 Other users now require
+                    an active subscription.
+                    """);
+
+            return;
+        }
+
         // =====================================
         // UPDATE USER / SUBSCRIPTION
         // =====================================
@@ -1195,7 +1562,7 @@ public class TelegramService {
 
                 // SKIP RESERVED WORDS
 
-                if (value.equals("trial") || value.equals("trail") || value.equals("activate") || value.equals("admin") || value.equals("expire") || value.equals("monthly") || value.equals("yearly") || value.equals("lifetime") || value.equals("make") || value.equals("history") || value.equals("show")) {
+                if (value.equals("trial") || value.equals("trail") || value.equals("activate") || value.equals("admin") || value.equals("expire") || value.equals("monthly") || value.equals("yearly") || value.equals("lifetime") || value.equals("make") || value.equals("history") || value.equals("show") || value.equals("subscription")) {
 
                     continue;
                 }
@@ -1278,18 +1645,59 @@ public class TelegramService {
 
             // FREE TRIAL
 
+            // =====================================
+            // INDIVIDUAL FREE TRIAL
+            // =====================================
+
             if (lowerText.contains("trial") || lowerText.contains("trail")) {
 
                 int trialDays = 7;
 
-                for (String part : parts) {
+                for (int i = 0; i < parts.length; i++) {
 
-                    if (part.matches("\\d+")) {
+                    String part = parts[i];
 
-                        trialDays = Integer.parseInt(part);
+                    if (!part.matches("\\d+")) {
+                        continue;
+                    }
+
+                    long numericValue;
+
+                    try {
+
+                        numericValue = Long.parseLong(part);
+
+                    } catch (NumberFormatException e) {
+
+                        continue;
+                    }
+
+                    // Telegram ID value - don't use as trial days
+                    if (targetUser.getTelegramId() != null && numericValue == targetUser.getTelegramId()) {
+
+                        continue;
+                    }
+
+                    // Remaining small numeric value can be trial days
+                    if (numericValue >= 1 && numericValue <= 365) {
+
+                        trialDays = (int) numericValue;
 
                         break;
                     }
+                }
+
+                if (trialDays <= 0 || trialDays > 365) {
+
+                    sendMessage(bot, chatId, """
+                            ❌ Invalid Trial Days
+                            
+                            Allowed range:
+                            
+                            1 - 365 days
+                            """);
+
+                    return;
                 }
 
                 subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.FREE, BillingType.MONTHLY, BigDecimal.ZERO, trialDays);
@@ -1297,10 +1705,13 @@ public class TelegramService {
                 sendMessage(bot, chatId, """
                         ✅ FREE TRIAL ACTIVATED
                         
-                        👤 User :
+                        👤 User:
                         @%s
                         
-                        ⏳ Validity :
+                        🎁 Plan:
+                        FREE
+                        
+                        ⏳ Validity:
                         %s Days
                         """.formatted(targetUser.getUsername(), trialDays));
 
@@ -1388,11 +1799,15 @@ public class TelegramService {
 
         switch (intent) {
 
+            // =====================================
             // GET USERS
+            // =====================================
 
             case GET_USERS -> showUsers(bot, chatId, 0, null);
 
+            // =====================================
             // GET USER DETAILS
+            // =====================================
 
             case GET_USER_DETAILS -> sendMessage(bot, chatId, """
                     👤 USER DETAILS
@@ -1406,10 +1821,13 @@ public class TelegramService {
                     Example:
                     
                     @username
+                    
                     5999036520
                     """);
 
+            // =====================================
             // HISTORY
+            // =====================================
 
             case GET_HISTORY -> {
 
@@ -1423,12 +1841,18 @@ public class TelegramService {
 
                         targetUser = telegramUserService.getUserByTelegramId(Long.parseLong(value));
 
-                        if (targetUser != null) break;
+                        if (targetUser != null) {
+
+                            break;
+                        }
                     }
 
                     targetUser = telegramUserService.getUserByUsername(value);
 
-                    if (targetUser != null) break;
+                    if (targetUser != null) {
+
+                        break;
+                    }
                 }
 
                 if (targetUser != null) {
@@ -1451,7 +1875,9 @@ public class TelegramService {
                         """);
             }
 
+            // =====================================
             // UPDATE USER
+            // =====================================
 
             case UPDATE_USER -> sendMessage(bot, chatId, """
                     ⚙️ UPDATE USER
@@ -1464,26 +1890,97 @@ public class TelegramService {
                     
                     activate @username yearly
                     
+                    activate @username lifetime
+                    
                     make admin @username
                     
                     expire @username
                     """);
 
+            // =====================================
+            // GLOBAL TRIAL ON
+            //
+            // AI command does not automatically
+            // enable because endDate is required.
+            // =====================================
+
+            case GLOBAL_TRIAL_ON -> sendMessage(bot, chatId, """
+                    🌍 GLOBAL FREE TRIAL
+                    
+                    Please provide campaign
+                    end date.
+                    
+                    Usage:
+                    
+                    /trailonsubscription 2026-08-31
+                    
+                    Every eligible user receives
+                    maximum 7 days free access.
+                    
+                    User access never exceeds
+                    campaign end date.
+                    """);
+
+            // =====================================
+            // GLOBAL TRIAL OFF
+            // =====================================
+
+            case GLOBAL_TRIAL_OFF -> {
+
+                boolean disabled = globalTrialService.disableGlobalTrial();
+
+                if (disabled) {
+
+                    sendMessage(bot, chatId, """
+                            ⛔ GLOBAL FREE TRIAL DISABLED
+                            
+                            Global free access stopped.
+                            
+                            ✅ Paid subscriptions remain active.
+                            
+                            ✅ Individual manual trials
+                            remain active.
+                            """);
+
+                } else {
+
+                    sendMessage(bot, chatId, """
+                            ℹ️ No active global
+                            free trial found.
+                            """);
+                }
+            }
+
+            // =====================================
             // UNKNOWN
+            // =====================================
 
             default -> sendMessage(bot, chatId, """
                     👑 OWNER PANEL
                     
                     /users
+                    
                     /userdetails
+                    
                     /activeusers
+                    
                     /expiredusers
+                    
                     /history
+                    
                     /updateuser
+                    
+                    /trailonsubscription
+                    
+                    /trailoffsubscription
+                    
                     /usage
+                    
                     /stories
+                    
                     /syncstories
-                    /deleteInactiveStory
+                    
+                    /deleteinactivestory
                     """);
         }
     }
@@ -2097,6 +2594,288 @@ public class TelegramService {
     // RANGE SEARCH
     // =========================================
 
+    // =========================================
+    // CUSTOM RANGE SEARCH
+    //
+    // MAX 50 EPISODES
+    // DIRECT AUDIO DELIVERY
+    // NO EPISODE LIST
+    // NO EPISODE BUTTONS
+    // =========================================
+
+    private void sendEpisodesByRange(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Story story,
+            int start,
+            int end) {
+
+        try {
+
+            // =====================================
+            // VALIDATION
+            // =====================================
+
+            if (story == null) {
+
+                sendMessage(
+                        bot,
+                        chatId,
+                        "❌ Story not found"
+                );
+
+                return;
+            }
+
+            if (start <= 0 || end <= 0 || start > end) {
+
+                sendMessage(
+                        bot,
+                        chatId,
+                        """
+                        ❌ Invalid Episode Range
+    
+                        Example:
+    
+                        20-50
+                        """
+                );
+
+                return;
+            }
+
+            int requestedCount = end - start + 1;
+
+            if (requestedCount > 50) {
+
+                sendMessage(
+                        bot,
+                        chatId,
+                        """
+                        ❌ Maximum 50 episodes
+                        allowed per search.
+    
+                        Example:
+    
+                        1-50
+                        51-100
+                        """
+                );
+
+                return;
+            }
+
+            // =====================================
+            // GET EPISODES
+            // =====================================
+
+            List<Episode> episodes =
+                    episodeService.getEpisodesByRange(
+                            story,
+                            start,
+                            end
+                    );
+
+            if (episodes == null || episodes.isEmpty()) {
+
+                sendMessage(
+                        bot,
+                        chatId,
+                        """
+                        ❌ No episodes found
+    
+                        Requested:
+    
+                        EP %d - %d
+                        """
+                                .formatted(
+                                        start,
+                                        end
+                                )
+                );
+
+                return;
+            }
+
+            // =====================================
+            // SEND START MESSAGE
+            // =====================================
+
+            sendMessage(
+                    bot,
+                    chatId,
+                    """
+                    🔍 SEARCH RESULT
+    
+                    🎧 %s
+    
+                    📦 Range:
+                    EP %d - %d
+    
+                    🎵 Found:
+                    %d Episodes
+    
+                    Sending audio files...
+                    """
+                            .formatted(
+                                    story.getTitle(),
+                                    start,
+                                    end,
+                                    episodes.size()
+                            )
+            );
+
+            // =====================================
+            // SEND EACH AUDIO DIRECTLY
+            // =====================================
+
+            int sentCount = 0;
+
+            for (Episode episode : episodes) {
+
+                if (episode == null) {
+
+                    continue;
+                }
+
+                if (episode.getTelegramFileId() == null
+                        || episode.getTelegramFileId().isBlank()) {
+
+                    log.warn(
+                            "Skipping episode without fileId episodeId={} episodeNo={}",
+                            episode.getId(),
+                            episode.getEpisodeNo()
+                    );
+
+                    continue;
+                }
+
+                SendAudio sendAudio = new SendAudio();
+
+                sendAudio.setChatId(
+                        String.valueOf(chatId)
+                );
+
+                sendAudio.setAudio(
+                        new InputFile(
+                                episode.getTelegramFileId()
+                        )
+                );
+
+                sendAudio.setCaption(
+                        """
+                        🎧 %s
+    
+                        EP %s
+                        """
+                                .formatted(
+                                        story.getTitle(),
+                                        episode.getEpisodeNo()
+                                )
+                );
+
+                // =====================================
+                // PROTECT AUDIO FOR EVERYONE
+                // =====================================
+
+                sendAudio.setProtectContent(true);
+
+                bot.execute(sendAudio);
+
+                sentCount++;
+            }
+
+            // =====================================
+            // SEARCH AGAIN BUTTON
+            // =====================================
+
+            InlineKeyboardButton searchAgain =
+                    new InlineKeyboardButton();
+
+            searchAgain.setText(
+                    "🔍 Search Again"
+            );
+
+            searchAgain.setCallbackData(
+                    "search_" + story.getId()
+            );
+
+            InlineKeyboardButton back =
+                    new InlineKeyboardButton();
+
+            back.setText(
+                    "🔙 Stories"
+            );
+
+            back.setCallbackData(
+                    "stories_0"
+            );
+
+            InlineKeyboardMarkup keyboard =
+                    new InlineKeyboardMarkup();
+
+            keyboard.setKeyboard(
+                    List.of(
+                            List.of(
+                                    searchAgain,
+                                    back
+                            )
+                    )
+            );
+
+            SendMessage completed =
+                    new SendMessage();
+
+            completed.setChatId(
+                    String.valueOf(chatId)
+            );
+
+            completed.setText(
+                    """
+                    ✅ Episodes Sent
+    
+                    🎵 %d audio files delivered.
+    
+                    You can search another range
+                    or go back to stories.
+                    """
+                            .formatted(sentCount)
+            );
+
+            completed.setReplyMarkup(keyboard);
+
+            completed.setProtectContent(true);
+
+            bot.execute(completed);
+
+        } catch (Exception e) {
+
+            log.error(
+                    "sendEpisodesByRange failed storyId={} start={} end={}",
+                    story != null ? story.getId() : null,
+                    start,
+                    end,
+                    e
+            );
+
+            try {
+
+                sendMessage(
+                        bot,
+                        chatId,
+                        """
+                        ❌ Failed to send episodes.
+    
+                        Please try again.
+                        """
+                );
+
+            } catch (Exception ignore) {
+
+            }
+        }
+    }
+
     private void showEpisodesByRange(TelegramLongPollingBot bot, Long chatId, Story story, int start, int end) {
 
         try {
@@ -2206,7 +2985,7 @@ public class TelegramService {
             // =====================================
 
             sendAudio.setProtectContent(shouldProtectContent(user));
-
+            sendAudio.setProtectContent(true);
             bot.execute(sendAudio);
 
         } catch (Exception e) {
@@ -2229,7 +3008,8 @@ public class TelegramService {
 
         TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
 
-        sendMessage.setProtectContent(user == null || user.getRole() != UserRole.OWNER);
+        sendMessage.setProtectContent(shouldProtectContent(user));
+        sendMessage.setProtectContent(true);
 
         return bot.execute(sendMessage);
     }
@@ -2258,17 +3038,20 @@ public class TelegramService {
 
     // =========================================
     // CONTENT PROTECTION
-    // OWNER & ADMIN -> Forward Allowed
-    // OTHERS -> Forward Blocked
+    //
+    // EVERYONE:
+    // OWNER
+    // ADMIN
+    // USER
+    // TRIAL
+    // SUBSCRIBER
+    //
+    // FORWARD / SAVE / DOWNLOAD BLOCKED
     // =========================================
 
     private boolean shouldProtectContent(TelegramUser user) {
 
-        if (user == null) {
-            return true;
-        }
-
-        return user.getRole() != UserRole.OWNER && user.getRole() != UserRole.ADMIN;
+        return true;
     }
 
     private void syncStories(TelegramLongPollingBot bot,

@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.telegram.telegrambots.meta.api.objects.User;
 
 import java.time.LocalDateTime;
@@ -23,57 +24,120 @@ public class TelegramUserService {
     private final TelegramConfig telegramConfig;
 
     // =========================================
-    // SAVE OR UPDATE USER
+    // SAVE OR UPDATE TELEGRAM USER
     // =========================================
 
+    @Transactional
     public TelegramUser saveOrUpdateUser(User telegramApiUser, Long chatId) {
 
         try {
+
+            // =====================================
+            // VALIDATION
+            // =====================================
+
+            if (telegramApiUser == null) {
+
+                throw new IllegalArgumentException("Telegram API user cannot be null");
+            }
+
+            if (telegramApiUser.getId() == null) {
+
+                throw new IllegalArgumentException("Telegram user ID cannot be null");
+            }
+
+            if (chatId == null) {
+
+                throw new IllegalArgumentException("Telegram chat ID cannot be null");
+            }
 
             Long telegramId = telegramApiUser.getId();
 
             TelegramUser existingUser = telegramUserRepository.findByTelegramId(telegramId).orElse(null);
 
             // =====================================
-            // UPDATE EXISTING USER
+            // EXISTING USER
             // =====================================
 
             if (existingUser != null) {
 
                 updateExistingUser(existingUser, telegramApiUser, chatId);
 
-                log.info("Existing user updated telegramId={}", telegramId);
+                TelegramUser savedUser = telegramUserRepository.save(existingUser);
 
-                return telegramUserRepository.save(existingUser);
+                log.debug("Existing Telegram user updated telegramId={} role={} joinedAt={} lastActiveAt={}", savedUser.getTelegramId(), savedUser.getRole(), savedUser.getJoinedAt(), savedUser.getLastActiveAt());
+
+                return savedUser;
             }
+
+            // =====================================
+            // NEW USER ROLE
+            // =====================================
+
+            UserRole role = determineUserRole(telegramId);
+
+            LocalDateTime now = LocalDateTime.now();
 
             // =====================================
             // CREATE NEW USER
+            //
+            // joinedAt is CRITICAL for global trial.
+            // Never change it after creation.
             // =====================================
 
-            UserRole role = UserRole.USER;
+            TelegramUser newUser = TelegramUser.builder()
 
-            if (telegramId.equals(telegramConfig.getOwnerId())) {
+                    .telegramId(telegramId)
 
-                role = UserRole.OWNER;
-            }
+                    .chatId(chatId)
 
-            TelegramUser newUser = TelegramUser.builder().telegramId(telegramId).chatId(chatId).username(telegramApiUser.getUserName()).firstName(telegramApiUser.getFirstName()).lastName(telegramApiUser.getLastName()).languageCode(telegramApiUser.getLanguageCode()).premiumUser(telegramApiUser.getIsPremium()).bot(telegramApiUser.getIsBot()).role(role).joinedAt(LocalDateTime.now()).lastActiveAt(LocalDateTime.now()).build();
+                    .username(telegramApiUser.getUserName())
 
-            log.info("New user created telegramId={} role={}", telegramId, role);
+                    .firstName(telegramApiUser.getFirstName())
 
-            return telegramUserRepository.save(newUser);
+                    .lastName(telegramApiUser.getLastName())
+
+                    .languageCode(telegramApiUser.getLanguageCode())
+
+                    .premiumUser(Boolean.TRUE.equals(telegramApiUser.getIsPremium()))
+
+                    .bot(telegramApiUser.getIsBot())
+
+                    .role(role)
+
+                    .joinedAt(now)
+
+                    .lastActiveAt(now)
+
+                    .build();
+
+            TelegramUser savedUser = telegramUserRepository.save(newUser);
+
+            log.info("""
+                    New Telegram user created
+                    telegramId={}
+                    username={}
+                    role={}
+                    joinedAt={}
+                    """, savedUser.getTelegramId(), savedUser.getUsername(), savedUser.getRole(), savedUser.getJoinedAt());
+
+            return savedUser;
 
         } catch (Exception e) {
 
-            log.error("saveOrUpdateUser failed", e);
+            log.error("saveOrUpdateUser failed telegramId={}", telegramApiUser != null ? telegramApiUser.getId() : null, e);
 
             throw e;
         }
     }
 
     // =========================================
-    // UPDATE USER
+    // UPDATE EXISTING USER
+    //
+    // IMPORTANT:
+    //
+    // joinedAt MUST NOT be changed.
+    // Global trial logic depends on joinedAt.
     // =========================================
 
     private void updateExistingUser(TelegramUser existingUser, User telegramApiUser, Long chatId) {
@@ -88,11 +152,37 @@ public class TelegramUserService {
 
         existingUser.setLanguageCode(telegramApiUser.getLanguageCode());
 
-        existingUser.setPremiumUser(telegramApiUser.getIsPremium());
+        existingUser.setPremiumUser(Boolean.TRUE.equals(telegramApiUser.getIsPremium()));
 
         existingUser.setBot(telegramApiUser.getIsBot());
 
+        // =====================================
+        // UPDATE ONLY LAST ACTIVE TIME
+        // =====================================
+
         existingUser.setLastActiveAt(LocalDateTime.now());
+
+        // =====================================
+        // NEVER DO THIS
+        // =====================================
+
+        // existingUser.setJoinedAt(
+        //         LocalDateTime.now()
+        // );
+    }
+
+    // =========================================
+    // DETERMINE USER ROLE
+    // =========================================
+
+    private UserRole determineUserRole(Long telegramId) {
+
+        if (telegramId != null && telegramConfig.getOwnerId() != null && telegramId.equals(telegramConfig.getOwnerId())) {
+
+            return UserRole.OWNER;
+        }
+
+        return UserRole.USER;
     }
 
     // =========================================
@@ -101,36 +191,66 @@ public class TelegramUserService {
 
     public Page<TelegramUser> getUsers(int page, int size) {
 
-        return telegramUserRepository.findByRoleNotOrderByLastActiveAtDesc(UserRole.OWNER, PageRequest.of(page, size));
+        int safePage = Math.max(page, 0);
+
+        int safeSize = Math.max(size, 1);
+
+        return telegramUserRepository.findByRoleNotOrderByLastActiveAtDesc(UserRole.OWNER, PageRequest.of(safePage, safeSize));
     }
 
     // =========================================
-    // FIND USER
+    // FIND USER BY TELEGRAM ID
     // =========================================
 
     public TelegramUser getUserByTelegramId(Long telegramId) {
 
+        if (telegramId == null) {
+
+            return null;
+        }
+
         return telegramUserRepository.findByTelegramId(telegramId).orElse(null);
     }
 
+    // =========================================
+    // FIND USER BY USERNAME
+    // =========================================
+
     public TelegramUser getUserByUsername(String username) {
 
-        return telegramUserRepository.findByUsername(username).orElse(null);
+        if (username == null || username.isBlank()) {
+
+            return null;
+        }
+
+        String cleanedUsername = username.trim().replace("@", "");
+
+        return telegramUserRepository.findByUsername(cleanedUsername).orElse(null);
     }
 
     // =========================================
     // UPDATE USER ROLE
     // =========================================
 
+    @Transactional
     public TelegramUser updateUserRole(TelegramUser user, UserRole role) {
+
+        if (user == null) {
+
+            throw new IllegalArgumentException("Telegram user is required");
+        }
+
+        if (role == null) {
+
+            throw new IllegalArgumentException("User role is required");
+        }
 
         user.setRole(role);
 
         TelegramUser updatedUser = telegramUserRepository.save(user);
 
-        log.info("User role updated telegramId={} role={}", user.getTelegramId(), role);
+        log.info("User role updated telegramId={} role={}", updatedUser.getTelegramId(), updatedUser.getRole());
 
         return updatedUser;
     }
 }
-

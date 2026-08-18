@@ -16,43 +16,117 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-@Table(name = "subscriptions")
+@Table(name = "subscriptions", indexes = {@Index(name = "idx_subscription_user", columnList = "telegram_user_id"), @Index(name = "idx_subscription_status", columnList = "status"), @Index(name = "idx_subscription_expiry", columnList = "expiryDate")})
 public class Subscription {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "telegram_user_id", nullable = false, unique = true)
+    // =========================================
+    // USER
+    //
+    // MANY subscription records can belong
+    // to ONE Telegram user.
+    // Required for subscription history.
+    // =========================================
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "telegram_user_id", nullable = false)
     private TelegramUser telegramUser;
 
-    @Enumerated(EnumType.STRING)
-    private SubscriptionPlan plan; //    FREE, MONTHLY, YEARLY, LIFETIME
+    // =========================================
+    // PLAN
+    // =========================================
 
-    @Enumerated(EnumType.STRING)
-    private BillingType billingType; //    MONTHLY, YEARLY, LIFETIME
-
-    @Column(precision = 10, scale = 2)
-    private BigDecimal amount;
-
-    // Payment Completed ?
-    private Boolean paymentDone;
-
-    // SUBSCRIPTION STATUS
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private SubscriptionStatus status; //    ACTIVE, EXPIRED, CANCELLED
+    private SubscriptionPlan plan;
 
-    // Trial User
+    // FREE / MONTHLY / YEARLY / LIFETIME
+
+    // =========================================
+    // BILLING
+    // =========================================
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private BillingType billingType;
+
+    @Column(precision = 10, scale = 2, nullable = false)
+    private BigDecimal amount;
+
+    // =========================================
+    // PAYMENT
+    // =========================================
+
+    @Column(nullable = false)
+    private Boolean paymentDone;
+
+    // =========================================
+    // STATUS
+    // =========================================
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private SubscriptionStatus status;
+
+    // ACTIVE / EXPIRED / CANCELLED
+
+    // =========================================
+    // MANUAL USER TRIAL
+    // =========================================
+
+    @Column(nullable = false)
     private Boolean trial;
 
+    // =========================================
+    // VALIDITY
+    // =========================================
+
+    @Column(nullable = false)
     private LocalDate startDate;
 
+    @Column(nullable = false)
     private LocalDate expiryDate;
 
+    // =========================================
+    // AUDIT
+    // =========================================
+
+    @Column(nullable = false)
     private LocalDateTime createdAt;
 
+    @Column(nullable = false)
     private LocalDateTime updatedAt;
 
+    @PrePersist
+    public void prePersist() {
+
+        LocalDateTime now = LocalDateTime.now();
+
+        if (createdAt == null) {
+            createdAt = now;
+        }
+
+        updatedAt = now;
+
+        if (amount == null) {
+            amount = BigDecimal.ZERO;
+        }
+
+        if (paymentDone == null) {
+            paymentDone = false;
+        }
+
+        if (trial == null) {
+            trial = false;
+        }
+    }
+
+    @PreUpdate
+    public void preUpdate() {
+
+        updatedAt = LocalDateTime.now();
+    }
 }
