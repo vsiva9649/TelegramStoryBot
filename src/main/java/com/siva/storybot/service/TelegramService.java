@@ -36,6 +36,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -60,6 +61,7 @@ public class TelegramService {
 
     private final EpisodeService episodeService;
     private final Map<Long, Long> searchStoryContext = new ConcurrentHashMap<>();
+    private final Set<Long> activeEpisodeBatches = ConcurrentHashMap.newKeySet();
 
     // =========================================
     // SCHEDULER
@@ -114,45 +116,30 @@ public class TelegramService {
         }
     }
 
-    private void sendSubscriptionRequiredMessage(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            Integer userMessageId) {
+    private void sendSubscriptionRequiredMessage(TelegramLongPollingBot bot, Long chatId, Integer userMessageId) {
 
         try {
 
-            Message botMessage = sendMessage(
-                    bot,
-                    chatId,
-                    """
+            Message botMessage = sendMessage(bot, chatId, """
                     🔒 Subscription Required
-    
+                    
                     Your free access or subscription
                     is currently unavailable.
-    
+                    
                     To continue listening to stories,
                     please activate a subscription.
-    
+                    
                     👑 Please Contact Admin
-                    """
-            );
+                    """);
 
             if (userMessageId != null) {
 
-                autoDeleteMessages(
-                        bot,
-                        chatId,
-                        userMessageId,
-                        botMessage.getMessageId()
-                );
+                autoDeleteMessages(bot, chatId, userMessageId, botMessage.getMessageId());
             }
 
         } catch (Exception e) {
 
-            log.error(
-                    "sendSubscriptionRequiredMessage failed",
-                    e
-            );
+            log.error("sendSubscriptionRequiredMessage failed", e);
         }
     }
 
@@ -346,13 +333,6 @@ public class TelegramService {
 
             TelegramUser telegramUser = telegramUserService.saveOrUpdateUser(telegramApiUser, chatId);
 
-            if (telegramUser.getRole() == UserRole.OWNER) {
-
-                handleOwnerCommands(bot, chatId, text);
-
-                return;
-            }
-
             // =====================================
             // COMPLETE ACCESS CHECK
             //
@@ -370,7 +350,86 @@ public class TelegramService {
 
             if (!active) {
 
+                // Never keep an old selected story after access ends.
+                // If a global trial is turned back ON later, the user
+                // must explicitly select a story again.
+                searchStoryContext.remove(chatId);
+
                 sendSubscriptionRequiredMessage(bot, chatId, userMessageId);
+
+                return;
+            }
+
+            // =====================================
+            // CUSTOM EPISODE RANGE SEARCH
+            //
+            // IMPORTANT:
+            // This is checked before OWNER commands so
+            // OWNER can also type ranges like 1-50.
+            // =====================================
+
+            if (text.matches("\\d+\\s*-\\s*\\d+")) {
+
+                handleEpisodeRangeSearch(bot, chatId, telegramUser, text);
+
+                return;
+            }
+
+            // =====================================
+            // USER-FACING STORY MENU ACTIONS
+            //
+            // These must work for USER, ADMIN and OWNER.
+            // In particular, OWNER can use the same story/search
+            // flow to verify forwarding and episode delivery.
+            // =====================================
+
+            if (text.equalsIgnoreCase("🏠 Main Menu")) {
+                showMainMenu(bot, chatId);
+                return;
+            }
+
+            if (text.equalsIgnoreCase("Tamil Stories")) {
+                showTamilMenu(bot, chatId);
+                return;
+            }
+
+            if (text.equalsIgnoreCase("Hindi Stories")) {
+                searchStoryContext.remove(chatId);
+                sendMessage(bot, chatId, """
+                        🎬 Hindi Stories
+
+                        🚧 Coming Soon
+                        """);
+                return;
+            }
+
+            if (text.equalsIgnoreCase("🔥 OnGoing Stories")) {
+                showOnGoingStories(bot, chatId, 0);
+                return;
+            }
+
+            if (text.equalsIgnoreCase("✅ Completed Stories")) {
+                showCompletedStories(bot, chatId, 0);
+                return;
+            }
+
+            if (text.equalsIgnoreCase("🆘 Help")) {
+                showHelpMenu(bot, chatId);
+                return;
+            }
+
+            // =====================================
+            // OWNER MANAGEMENT COMMANDS
+            // =====================================
+
+            if (telegramUser.getRole() == UserRole.OWNER) {
+
+                // A management command exits any previously selected
+                // episode-search story. A range is handled above, so
+                // repeated range searches still work while in search mode.
+                searchStoryContext.remove(chatId);
+
+                handleOwnerCommands(bot, chatId, text);
 
                 return;
             }
@@ -437,133 +496,7 @@ public class TelegramService {
             }
 
 
-            // =====================================
-            // RANGE SEARCH (e.g. 20-50)
-            // =====================================
-
-            // =====================================
-// CUSTOM RANGE SEARCH
-// MAX 50 EPISODES
-// DIRECT AUDIO SEND
-// =====================================
-
-            if (text.matches("\\d+\\s*-\\s*\\d+")) {
-
-                Long storyId = searchStoryContext.get(chatId);
-
-                if (storyId == null) {
-
-                    sendMessage(bot, chatId, """
-                ❌ Search Context Not Found
-
-                Please open a story first,
-                then click 🔍 Search.
-                """);
-
-                    return;
-                }
-
-                String[] split = text.split("-");
-
-                int start = Integer.parseInt(split[0].trim());
-
-                int end = Integer.parseInt(split[1].trim());
-
-                // =====================================
-                // VALIDATE START / END
-                // =====================================
-
-                if (start <= 0 || end <= 0) {
-
-                    sendMessage(bot, chatId, """
-                ❌ Invalid Episode Range
-
-                Episode numbers must be
-                greater than 0.
-
-                Example:
-
-                20-50
-                """);
-
-                    return;
-                }
-
-                if (start > end) {
-
-                    sendMessage(bot, chatId, """
-                ❌ Invalid Range
-
-                Start episode cannot be
-                greater than end episode.
-
-                Example:
-
-                20-50
-                """);
-
-                    return;
-                }
-
-                // =====================================
-                // MAXIMUM 50 EPISODES
-                // =====================================
-
-                int requestedCount = end - start + 1;
-
-                if (requestedCount > 50) {
-
-                    sendMessage(bot, chatId, """
-                ❌ Search Range Too Large
-
-                Maximum 50 episodes
-                allowed per search.
-
-                Examples:
-
-                1-50
-                51-100
-                101-150
-                """);
-
-                    return;
-                }
-
-                // =====================================
-                // GET STORY
-                // =====================================
-
-                Story story = storyService.getStoryById(storyId);
-
-                if (story == null) {
-
-                    sendMessage(bot, chatId, "❌ Story not found");
-
-                    searchStoryContext.remove(chatId);
-
-                    return;
-                }
-
-                // =====================================
-                // SEND AUDIO DIRECTLY
-                // =====================================
-
-                sendEpisodesByRange(
-                        bot,
-                        chatId,
-                        story,
-                        start,
-                        end
-                );
-
-                // =====================================
-                // REMOVE SEARCH CONTEXT
-                // =====================================
-
-                searchStoryContext.remove(chatId);
-
-                return;
-            }
+            // Episode range input is handled above for USER, ADMIN and OWNER.
 
             // =====================================
             // DEFAULT — SHOW STORIES
@@ -582,6 +515,9 @@ public class TelegramService {
     private void showMainMenu(TelegramLongPollingBot bot, Long chatId) {
 
         try {
+
+            // Main menu means the previous episode search session is over.
+            searchStoryContext.remove(chatId);
 
             TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
 
@@ -646,6 +582,8 @@ public class TelegramService {
 
         try {
 
+            searchStoryContext.remove(chatId);
+
             SendMessage sendMessage = new SendMessage();
 
             sendMessage.setChatId(String.valueOf(chatId));
@@ -708,41 +646,36 @@ public class TelegramService {
         }
     }
 
-    private void showHelpMenu(
-            TelegramLongPollingBot bot,
-            Long chatId) {
+    private void showHelpMenu(TelegramLongPollingBot bot, Long chatId) {
 
         try {
 
-            sendMessage(
-                    bot,
-                    chatId,
-                    """
+            searchStoryContext.remove(chatId);
+
+            sendMessage(bot, chatId, """
                     ☎️ HELP & SUPPORT
-    
+                    
                     👑 Please Contact Admin
-    
+                    
                     💬 Contact Admin for:
-    
+                    
                     • Subscription
                     • Support
                     • Episode Issues
                     • Story Requests
-                    """
-            );
+                    """);
 
         } catch (Exception e) {
 
-            log.error(
-                    "showHelpMenu failed",
-                    e
-            );
+            log.error("showHelpMenu failed", e);
         }
     }
 
     private void showCompletedStories(TelegramLongPollingBot bot, Long chatId, int page) {
 
         try {
+
+            searchStoryContext.remove(chatId);
 
             int size = 10;
 
@@ -770,6 +703,8 @@ public class TelegramService {
     private void showOnGoingStories(TelegramLongPollingBot bot, Long chatId, int page) {
 
         try {
+
+            searchStoryContext.remove(chatId);
 
             int size = 10;
 
@@ -887,7 +822,16 @@ public class TelegramService {
             Integer messageId = callbackQuery.getMessage().getMessageId();
 
 
-            TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
+            TelegramUser user;
+
+            // Refresh user metadata/role on button clicks too.
+            // This also guarantees the configured owner ID is restored
+            // to OWNER before access and forwarding checks.
+            if (callbackQuery.getFrom() != null) {
+                user = telegramUserService.saveOrUpdateUser(callbackQuery.getFrom(), chatId);
+            } else {
+                user = telegramUserService.getUserByTelegramId(chatId);
+            }
 
             // =====================================
             // COMPLETE CALLBACK ACCESS CHECK
@@ -903,6 +847,8 @@ public class TelegramService {
             boolean active = subscriptionService.hasAccess(user);
 
             if (!active) {
+
+                searchStoryContext.remove(chatId);
 
                 sendSubscriptionRequiredMessage(bot, chatId, messageId);
 
@@ -988,10 +934,47 @@ public class TelegramService {
             }
 
             // =====================================
+            // ACTIVE USERS PAGINATION (OWNER)
+            // =====================================
+
+            if (data.startsWith("activeusers_")) {
+
+                if (user.getRole() != UserRole.OWNER) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                int page = Integer.parseInt(data.replace("activeusers_", ""));
+                showUsersByAccessStatus(bot, chatId, true, page, messageId);
+                return;
+            }
+
+            // =====================================
+            // EXPIRED USERS PAGINATION (OWNER)
+            // =====================================
+
+            if (data.startsWith("expiredusers_")) {
+
+                if (user.getRole() != UserRole.OWNER) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                int page = Integer.parseInt(data.replace("expiredusers_", ""));
+                showUsersByAccessStatus(bot, chatId, false, page, messageId);
+                return;
+            }
+
+            // =====================================
             // USERS PAGINATION (OWNER)
             // =====================================
 
             if (data.startsWith("users_")) {
+
+                if (user.getRole() != UserRole.OWNER) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
 
                 int page = Integer.parseInt(data.replace("users_", ""));
 
@@ -1005,6 +988,11 @@ public class TelegramService {
             // =====================================
 
             if (data.startsWith("history_")) {
+
+                if (user.getRole() != UserRole.OWNER) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
 
                 String[] split = data.split("_");
 
@@ -1028,6 +1016,13 @@ public class TelegramService {
 
             if (data.startsWith("stories_")) {
 
+                // /stories is the OWNER library and can include inactive stories.
+                // Never expose it to a normal USER/ADMIN through an old button.
+                if (user.getRole() != UserRole.OWNER) {
+                    showTamilMenu(bot, chatId);
+                    return;
+                }
+
                 int page = Integer.parseInt(data.replace("stories_", ""));
 
                 showStories(bot, chatId, page);
@@ -1036,108 +1031,70 @@ public class TelegramService {
             }
 
             // =====================================
-            // STORY OPEN
+            // STORY OPEN -> DIRECT CUSTOM SEARCH
+            //
+            // No episode pack/list screen is shown.
             // =====================================
 
             if (data.startsWith("story_")) {
 
                 Long storyId = Long.parseLong(data.replace("story_", ""));
 
-                showEpisodePacks(bot, chatId, storyId, 0);
+                openEpisodeSearch(bot, chatId, user, storyId);
 
                 return;
             }
 
             // =====================================
-            // PACK PAGE
+            // OLD PACK CALLBACK COMPATIBILITY
+            //
+            // Existing Telegram messages may still
+            // contain old pack buttons. Redirect them
+            // to the new custom search instead.
             // =====================================
 
-            if (data.startsWith("packs_")) {
+            if (data.startsWith("packs_") || data.startsWith("pack_")) {
 
                 String[] split = data.split("_");
 
                 Long storyId = Long.parseLong(split[1]);
 
-                int page = Integer.parseInt(split[2]);
-
-                showEpisodePacks(bot, chatId, storyId, page);
+                openEpisodeSearch(bot, chatId, user, storyId);
 
                 return;
             }
 
             // =====================================
-            // OPEN PACK
+            // SEARCH AGAIN
             // =====================================
-
-            if (data.startsWith("pack_")) {
-
-                String[] split = data.split("_");
-
-                Long storyId = Long.parseLong(split[1]);
-
-                int start = Integer.parseInt(split[2]);
-
-                int end = Integer.parseInt(split[3]);
-
-                showEpisodesInsidePack(bot, chatId, storyId, start, end);
-
-                return;
-            }
-
-            // =====================================
-            // SEARCH HINT
-            // =====================================
-
-            // =====================================
-// SEARCH HINT
-// =====================================
 
             if (data.startsWith("search_")) {
 
-                Long storyId =
-                        Long.parseLong(
-                                data.replace("search_", "")
-                        );
+                Long storyId = Long.parseLong(data.replace("search_", ""));
 
-                searchStoryContext.put(
-                        chatId,
-                        storyId
-                );
-
-                sendMessage(
-                        bot,
-                        chatId,
-                        """
-                        🔍 Episode Search
-            
-                        Enter episode range:
-            
-                        Examples:
-            
-                        1-50
-                        51-100
-                        120-150
-            
-                        ⚠️ Maximum 50 episodes
-                        allowed per search.
-            
-                        🎧 Audio files will be
-                        sent directly.
-                        """
-                );
+                openEpisodeSearch(bot, chatId, user, storyId);
 
                 return;
             }
 
             // =====================================
-            // PLAY AUDIO
+            // OLD SINGLE-EPISODE CALLBACK SUPPORT
             // =====================================
 
             if (data.startsWith("episode_")) {
 
-                Long episodeId = Long.parseLong(data.replace("episode_", ""));
+                searchStoryContext.remove(chatId);
 
-                sendEpisodeAudio(bot, chatId, episodeId);
+                sendMessage(bot, chatId, """
+                        ℹ️ Episode list buttons are no longer used.
+
+                        Please select a story and enter a custom range
+                        such as 1-50.
+                        """);
+
+                showTamilMenu(bot, chatId);
+
+                return;
             }
 
         } catch (Exception e) {
@@ -1156,6 +1113,8 @@ public class TelegramService {
 
         String lowerText = text.toLowerCase().trim();
 
+        String ownerCommand = normalizeOwnerCommand(text);
+
         String cleanedText = text.replace("@", "");
 
         String[] parts = cleanedText.split("\\s+");
@@ -1168,7 +1127,7 @@ public class TelegramService {
         // START
         // =====================================
 
-        if (lowerText.equals("/start")) {
+        if ("/start".equals(ownerCommand)) {
 
             sendMessage(bot, chatId, """
                     👑 Welcome, Owner!
@@ -1183,13 +1142,10 @@ public class TelegramService {
                        Users can listen to stories
                        directly inside Telegram
                     
-                    📦 Episode Pack System
-                       Episodes grouped in packs
-                       Easy navigation
-                    
-                    🔍 Episode Search
-                       Example:
-                       20-50
+                    🔍 Custom Episode Search
+                       Select a story and enter a range
+                       Example: 20-50
+                       Maximum 50 episodes per search
                     
                     💳 Subscription System
                        FREE
@@ -1201,8 +1157,8 @@ public class TelegramService {
                        Enable free access for
                        all eligible users
                     
-                    🤖 AI Intent Detection
-                       Powered by Groq AI
+                    🧭 Owner Command Routing
+                       Local-first, optional AI fallback
                     
                     ━━━━━━━━━━━━━━
                     👑 OWNER COMMANDS
@@ -1231,7 +1187,7 @@ public class TelegramService {
             return;
         }
 
-        if (lowerText.equals("/usage")) {
+        if ("/usage".equals(ownerCommand)) {
 
             sendMessage(bot, chatId, """
                     👑 OWNER USAGE GUIDE
@@ -1348,24 +1304,78 @@ public class TelegramService {
         }
 
         // =====================================
+        // CORE OWNER PANEL COMMANDS
+        //
+        // These are deterministic and MUST NOT depend on Groq.
+        // Telegram can send /command@BotUsername, so ownerCommand
+        // is normalized before matching.
+        // =====================================
+
+        if ("/users".equals(ownerCommand)) {
+            showUsers(bot, chatId, 0, null);
+            return;
+        }
+
+        if ("/activeusers".equals(ownerCommand)) {
+            showUsersByAccessStatus(bot, chatId, true, 0, null);
+            return;
+        }
+
+        if ("/expiredusers".equals(ownerCommand)) {
+            showUsersByAccessStatus(bot, chatId, false, 0, null);
+            return;
+        }
+
+        if ("/userdetails".equals(ownerCommand)) {
+
+            TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+            if (targetUser == null) {
+                sendUserDetailsHelp(bot, chatId);
+            } else {
+                showOwnerUserDetails(bot, chatId, targetUser);
+            }
+
+            return;
+        }
+
+        if ("/history".equals(ownerCommand)) {
+
+            TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+            if (targetUser == null) {
+                sendHistoryHelp(bot, chatId);
+            } else {
+                showUserHistory(bot, chatId, targetUser, 0, null);
+            }
+
+            return;
+        }
+
+        if ("/updateuser".equals(ownerCommand)) {
+            sendUpdateUserHelp(bot, chatId);
+            return;
+        }
+
+        // =====================================
         // STORIES
         // =====================================
 
-        if (lowerText.equals("/stories")) {
+        if ("/stories".equals(ownerCommand)) {
 
             showStories(bot, chatId, 0);
 
             return;
         }
 
-        if (lowerText.equals("/syncstories")) {
+        if ("/syncstories".equals(ownerCommand)) {
 
             syncStories(bot, chatId);
 
             return;
         }
 
-        if (lowerText.equals("/deleteinactivestory")) {
+        if ("/deleteinactivestory".equals(ownerCommand)) {
 
             deleteInactiveStories(bot, chatId);
 
@@ -1381,7 +1391,7 @@ public class TelegramService {
         // /trailonsubscription 2026-08-31
         // =====================================
 
-        if (lowerText.startsWith("/trailonsubscription")) {
+        if ("/trailonsubscription".equals(ownerCommand)) {
 
             // =====================================
             // OWNER ONLY
@@ -1496,7 +1506,7 @@ public class TelegramService {
         // GLOBAL FREE TRIAL OFF
         // =====================================
 
-        if (lowerText.equals("/trailoffsubscription")) {
+        if ("/trailoffsubscription".equals(ownerCommand)) {
 
             if (!chatId.equals(telegramConfig.getOwnerId())) {
 
@@ -1552,7 +1562,12 @@ public class TelegramService {
         // UPDATE USER / SUBSCRIPTION
         // =====================================
 
-        if (lowerText.contains("trial") || lowerText.contains("trail") || lowerText.contains("activate") || lowerText.contains("admin") || lowerText.contains("expire")) {
+        boolean wantsTrial = containsOwnerKeyword(text, "trial") || containsOwnerKeyword(text, "trail");
+        boolean wantsActivate = containsOwnerKeyword(text, "activate");
+        boolean wantsAdmin = containsOwnerKeyword(text, "admin");
+        boolean wantsExpire = containsOwnerKeyword(text, "expire");
+
+        if (wantsTrial || wantsActivate || wantsAdmin || wantsExpire) {
 
             TelegramUser targetUser = null;
 
@@ -1608,7 +1623,7 @@ public class TelegramService {
 
             // MAKE ADMIN
 
-            if (lowerText.contains("admin")) {
+            if (wantsAdmin) {
 
                 // =====================================
                 // ONLY OWNER CAN MAKE ADMIN
@@ -1649,7 +1664,7 @@ public class TelegramService {
             // INDIVIDUAL FREE TRIAL
             // =====================================
 
-            if (lowerText.contains("trial") || lowerText.contains("trail")) {
+            if (wantsTrial) {
 
                 int trialDays = 7;
 
@@ -1720,7 +1735,7 @@ public class TelegramService {
 
             // MONTHLY
 
-            if (lowerText.contains("monthly")) {
+            if (containsOwnerKeyword(text, "monthly")) {
 
                 subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.MONTHLY, BillingType.MONTHLY, new BigDecimal("299"), 30);
 
@@ -1739,7 +1754,7 @@ public class TelegramService {
 
             // YEARLY
 
-            if (lowerText.contains("yearly")) {
+            if (containsOwnerKeyword(text, "yearly")) {
 
                 subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.YEARLY, BillingType.YEARLY, new BigDecimal("1999"), 365);
 
@@ -1758,7 +1773,7 @@ public class TelegramService {
 
             // LIFETIME
 
-            if (lowerText.contains("lifetime")) {
+            if (containsOwnerKeyword(text, "lifetime")) {
 
                 subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.LIFETIME, BillingType.LIFETIME, new BigDecimal("4999"), 36500);
 
@@ -1774,7 +1789,7 @@ public class TelegramService {
 
             // EXPIRE
 
-            if (lowerText.contains("expire")) {
+            if (wantsExpire) {
 
                 subscriptionService.expireSubscription(targetUser);
 
@@ -1790,7 +1805,11 @@ public class TelegramService {
         }
 
         // =====================================
-        // GROQ AI INTENT DETECTION
+        // LOCAL-FIRST / OPTIONAL GROQ INTENT FALLBACK
+        //
+        // GroqService checks deterministic local rules first.
+        // The network is used only for wording that local rules
+        // cannot classify, so an AI outage cannot break commands.
         // =====================================
 
         OwnerIntent intent = groqService.detectIntent(text);
@@ -1799,189 +1818,433 @@ public class TelegramService {
 
         switch (intent) {
 
-            // =====================================
-            // GET USERS
-            // =====================================
-
             case GET_USERS -> showUsers(bot, chatId, 0, null);
 
-            // =====================================
-            // GET USER DETAILS
-            // =====================================
+            case GET_ACTIVE_USERS -> showUsersByAccessStatus(bot, chatId, true, 0, null);
 
-            case GET_USER_DETAILS -> sendMessage(bot, chatId, """
-                    👤 USER DETAILS
-                    
-                    Send:
-                    
-                    Telegram ID
-                    OR
-                    Username
-                    
-                    Example:
-                    
-                    @username
-                    
-                    5999036520
-                    """);
+            case GET_EXPIRED_USERS -> showUsersByAccessStatus(bot, chatId, false, 0, null);
 
-            // =====================================
-            // HISTORY
-            // =====================================
+            case GET_USER_DETAILS -> {
+
+                TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+                if (targetUser == null) {
+                    sendUserDetailsHelp(bot, chatId);
+                } else {
+                    showOwnerUserDetails(bot, chatId, targetUser);
+                }
+            }
 
             case GET_HISTORY -> {
 
-                TelegramUser targetUser = null;
+                TelegramUser targetUser = resolveOwnerTargetUser(text);
 
-                for (String part : parts) {
-
-                    String value = part.replace("@", "");
-
-                    if (value.matches("\\d+")) {
-
-                        targetUser = telegramUserService.getUserByTelegramId(Long.parseLong(value));
-
-                        if (targetUser != null) {
-
-                            break;
-                        }
-                    }
-
-                    targetUser = telegramUserService.getUserByUsername(value);
-
-                    if (targetUser != null) {
-
-                        break;
-                    }
-                }
-
-                if (targetUser != null) {
-
+                if (targetUser == null) {
+                    sendHistoryHelp(bot, chatId);
+                } else {
                     showUserHistory(bot, chatId, targetUser, 0, null);
-
-                    return;
                 }
-
-                sendMessage(bot, chatId, """
-                        📜 SUBSCRIPTION HISTORY
-                        
-                        Usage:
-                        
-                        history @username
-                        
-                        OR
-                        
-                        history 5999036520
-                        """);
             }
 
-            // =====================================
-            // UPDATE USER
-            // =====================================
-
-            case UPDATE_USER -> sendMessage(bot, chatId, """
-                    ⚙️ UPDATE USER
-                    
-                    Examples:
-                    
-                    trial @username
-                    
-                    activate @username monthly
-                    
-                    activate @username yearly
-                    
-                    activate @username lifetime
-                    
-                    make admin @username
-                    
-                    expire @username
-                    """);
-
-            // =====================================
-            // GLOBAL TRIAL ON
-            //
-            // AI command does not automatically
-            // enable because endDate is required.
-            // =====================================
+            case UPDATE_USER -> sendUpdateUserHelp(bot, chatId);
 
             case GLOBAL_TRIAL_ON -> sendMessage(bot, chatId, """
                     🌍 GLOBAL FREE TRIAL
-                    
-                    Please provide campaign
-                    end date.
-                    
-                    Usage:
-                    
-                    /trailonsubscription 2026-08-31
-                    
-                    Every eligible user receives
-                    maximum 7 days free access.
-                    
-                    User access never exceeds
-                    campaign end date.
-                    """);
 
-            // =====================================
-            // GLOBAL TRIAL OFF
-            // =====================================
+                    Please provide campaign end date.
+
+                    Usage:
+                    /trailonsubscription 2026-08-31
+
+                    Every eligible user receives maximum 7 days free access.
+                    User access never exceeds the campaign end date.
+                    """);
 
             case GLOBAL_TRIAL_OFF -> {
 
                 boolean disabled = globalTrialService.disableGlobalTrial();
 
                 if (disabled) {
-
                     sendMessage(bot, chatId, """
                             ⛔ GLOBAL FREE TRIAL DISABLED
-                            
+
                             Global free access stopped.
-                            
-                            ✅ Paid subscriptions remain active.
-                            
-                            ✅ Individual manual trials
-                            remain active.
+                            Paid subscriptions and individual manual trials remain active.
                             """);
-
                 } else {
-
                     sendMessage(bot, chatId, """
-                            ℹ️ No active global
-                            free trial found.
+                            ℹ️ No active global free trial found.
                             """);
                 }
             }
 
-            // =====================================
-            // UNKNOWN
-            // =====================================
+            default -> sendOwnerPanel(bot, chatId);
+        }
+    }
 
-            default -> sendMessage(bot, chatId, """
-                    👑 OWNER PANEL
-                    
-                    /users
-                    
-                    /userdetails
-                    
-                    /activeusers
-                    
-                    /expiredusers
-                    
-                    /history
-                    
-                    /updateuser
-                    
-                    /trailonsubscription
-                    
-                    /trailoffsubscription
-                    
-                    /usage
-                    
-                    /stories
-                    
-                    /syncstories
-                    
-                    /deleteinactivestory
-                    """);
+    // =========================================
+    // OWNER COMMAND HELPERS
+    // =========================================
+
+    private boolean containsOwnerKeyword(String text, String keyword) {
+
+        if (text == null || text.isBlank() || keyword == null || keyword.isBlank()) {
+            return false;
+        }
+
+        for (String rawToken : text.trim().split("\\s+")) {
+
+            if (rawToken == null || rawToken.isBlank()) {
+                continue;
+            }
+
+            String token = rawToken.trim().toLowerCase();
+
+            // @username is always a target value, never a command keyword.
+            if (token.startsWith("@")) {
+                continue;
+            }
+
+            if (token.startsWith("/")) {
+                token = token.substring(1);
+            }
+
+            int botMentionIndex = token.indexOf('@');
+            if (botMentionIndex > 0) {
+                token = token.substring(0, botMentionIndex);
+            }
+
+            token = token.replaceAll("^[,.:;]+|[,.:;]+$", "");
+
+            if (token.equals(keyword.toLowerCase())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private String normalizeOwnerCommand(String text) {
+
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+
+        String firstToken = text.trim().toLowerCase().split("\\s+", 2)[0];
+
+        int botMentionIndex = firstToken.indexOf('@');
+
+        if (botMentionIndex > 0) {
+            firstToken = firstToken.substring(0, botMentionIndex);
+        }
+
+        return firstToken;
+    }
+
+    private TelegramUser resolveOwnerTargetUser(String text) {
+
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+
+        Set<String> reservedWords = Set.of(
+                "show", "get", "find", "user", "users", "details", "detail",
+                "history", "subscription", "subscriptions", "payment", "payments",
+                "activate", "trial", "trail", "monthly", "yearly", "lifetime",
+                "make", "admin", "expire", "expired", "active", "inactive",
+                "update", "role", "plan", "please", "for", "of"
+        );
+
+        for (String rawPart : text.trim().split("\\s+")) {
+
+            if (rawPart == null || rawPart.isBlank()) {
+                continue;
+            }
+
+            String value = rawPart.trim();
+
+            if (value.startsWith("/")) {
+                continue;
+            }
+
+            value = value.replace("@", "").replaceAll("^[,.:;]+|[,.:;]+$", "");
+
+            if (value.isBlank()) {
+                continue;
+            }
+
+            if (value.matches("\\d+")) {
+
+                try {
+                    TelegramUser user = telegramUserService.getUserByTelegramId(Long.parseLong(value));
+                    if (user != null) {
+                        return user;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // Continue with the next token.
+                }
+            }
+
+            String lowerValue = value.toLowerCase();
+
+            if (reservedWords.contains(lowerValue)) {
+                continue;
+            }
+
+            TelegramUser user = telegramUserService.getUserByUsername(value);
+
+            if (user != null) {
+                return user;
+            }
+        }
+
+        return null;
+    }
+
+    private void sendUserDetailsHelp(TelegramLongPollingBot bot, Long chatId) throws Exception {
+
+        sendMessage(bot, chatId, """
+                👤 USER DETAILS
+
+                Usage:
+                /userdetails @username
+                /userdetails 5999036520
+
+                You can also type:
+                show user @username
+                """);
+    }
+
+    private void sendHistoryHelp(TelegramLongPollingBot bot, Long chatId) throws Exception {
+
+        sendMessage(bot, chatId, """
+                📜 SUBSCRIPTION HISTORY
+
+                Usage:
+                /history @username
+                /history 5999036520
+
+                You can also type:
+                history @username
+                """);
+    }
+
+    private void sendUpdateUserHelp(TelegramLongPollingBot bot, Long chatId) throws Exception {
+
+        sendMessage(bot, chatId, """
+                ⚙️ UPDATE USER
+
+                Individual free trial:
+                trial @username
+                trial @username 15
+
+                Paid plans:
+                activate @username monthly
+                activate @username yearly
+                activate @username lifetime
+
+                Role:
+                make admin @username
+
+                Expire current access:
+                expire @username
+                """);
+    }
+
+    private void sendOwnerPanel(TelegramLongPollingBot bot, Long chatId) throws Exception {
+
+        sendMessage(bot, chatId, """
+                👑 OWNER PANEL
+
+                👥 Users
+                /users
+                /userdetails @username
+                /activeusers
+                /expiredusers
+
+                💳 Subscription
+                /history @username
+                /updateuser
+
+                🌍 Global Free Trial
+                /trailonsubscription 2026-08-31
+                /trailoffsubscription
+
+                📚 Stories
+                /stories
+                /syncstories
+                /deleteinactivestory
+
+                ℹ️ Help
+                /usage
+                """);
+    }
+
+    private void showOwnerUserDetails(TelegramLongPollingBot bot, Long chatId, TelegramUser user) throws Exception {
+
+        if (user == null) {
+            sendUserDetailsHelp(bot, chatId);
+            return;
+        }
+
+        boolean subscriptionActive = subscriptionService.hasActiveSubscription(user);
+        boolean globalTrialActive = !subscriptionActive && globalTrialService.hasGlobalTrialAccess(user);
+
+        String accessSource;
+
+        if (user.getRole() == UserRole.OWNER || user.getRole() == UserRole.ADMIN) {
+            accessSource = "ROLE BYPASS";
+        } else if (subscriptionActive) {
+            accessSource = "SUBSCRIPTION";
+        } else if (globalTrialActive) {
+            accessSource = "GLOBAL TRIAL";
+        } else {
+            accessSource = "NO ACCESS";
+        }
+
+        List<Subscription> history = subscriptionService.getUserSubscriptionHistory(user);
+        Subscription latest = history.isEmpty() ? null : history.get(0);
+
+        String username = user.getUsername() == null || user.getUsername().isBlank()
+                ? "No Username"
+                : "@" + user.getUsername();
+
+        String latestPlan = latest == null ? "-" : String.valueOf(latest.getPlan());
+        String latestStatus = latest == null ? "-" : String.valueOf(latest.getStatus());
+        String latestStart = latest == null ? "-" : String.valueOf(latest.getStartDate());
+        String latestExpiry = latest == null ? "-" : String.valueOf(latest.getExpiryDate());
+
+        sendMessage(bot, chatId, """
+                👤 USER DETAILS
+
+                🆔 Telegram ID: %s
+                👤 Username: %s
+                📝 Name: %s %s
+                🎭 Role: %s
+
+                🔐 Current Access: %s
+
+                📦 Latest Plan: %s
+                📌 Latest Status: %s
+                📅 Start: %s
+                ⏳ Expiry: %s
+
+                🕒 Joined: %s
+                🕒 Last Active: %s
+                """.formatted(
+                user.getTelegramId(),
+                username,
+                user.getFirstName() == null ? "" : user.getFirstName(),
+                user.getLastName() == null ? "" : user.getLastName(),
+                user.getRole(),
+                accessSource,
+                latestPlan,
+                latestStatus,
+                latestStart,
+                latestExpiry,
+                user.getJoinedAt(),
+                user.getLastActiveAt()
+        ));
+    }
+
+    private void showUsersByAccessStatus(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            boolean activeAccess,
+            int page,
+            Integer messageId) {
+
+        try {
+
+            int size = 10;
+
+            List<TelegramUser> filteredUsers = telegramUserService.getAllNonOwnerUsers()
+                    .stream()
+                    .filter(user -> subscriptionService.hasAccess(user) == activeAccess)
+                    .toList();
+
+            if (filteredUsers.isEmpty()) {
+
+                sendMessage(bot, chatId, activeAccess
+                        ? "✅ No active users found."
+                        : "✅ No expired/no-access users found.");
+
+                return;
+            }
+
+            int totalPages = (int) Math.ceil((double) filteredUsers.size() / size);
+            int safePage = Math.max(0, Math.min(page, totalPages - 1));
+            int start = safePage * size;
+            int end = Math.min(start + size, filteredUsers.size());
+
+            StringBuilder builder = new StringBuilder();
+
+            builder.append(activeAccess
+                    ? "✅ ACTIVE USERS\n\n"
+                    : "⛔ EXPIRED / NO-ACCESS USERS\n\n");
+
+            for (TelegramUser user : filteredUsers.subList(start, end)) {
+
+                builder.append("🆔 ").append(user.getTelegramId()).append("\n");
+                builder.append("👤 ");
+                builder.append(user.getUsername() == null || user.getUsername().isBlank()
+                        ? "No Username"
+                        : "@" + user.getUsername());
+                builder.append("\n");
+                builder.append("🎭 Role: ").append(user.getRole()).append("\n");
+                builder.append("🕒 Last Active: ").append(user.getLastActiveAt()).append("\n");
+                builder.append("━━━━━━━━━━━━━━\n");
+            }
+
+            builder.append("\n📄 Page ")
+                    .append(safePage + 1)
+                    .append(" / ")
+                    .append(totalPages);
+
+            String callbackPrefix = activeAccess ? "activeusers_" : "expiredusers_";
+            List<InlineKeyboardButton> row = new ArrayList<>();
+
+            if (safePage > 0) {
+                InlineKeyboardButton previous = new InlineKeyboardButton();
+                previous.setText("⬅️ Previous");
+                previous.setCallbackData(callbackPrefix + (safePage - 1));
+                row.add(previous);
+            }
+
+            InlineKeyboardButton indicator = new InlineKeyboardButton();
+            indicator.setText((safePage + 1) + "/" + totalPages);
+            indicator.setCallbackData("ignore");
+            row.add(indicator);
+
+            if (safePage < totalPages - 1) {
+                InlineKeyboardButton next = new InlineKeyboardButton();
+                next.setText("Next ➡️");
+                next.setCallbackData(callbackPrefix + (safePage + 1));
+                row.add(next);
+            }
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(List.of(row));
+
+            if (messageId != null) {
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(messageId);
+                edit.setText(builder.toString());
+                edit.setReplyMarkup(keyboard);
+                bot.execute(edit);
+                return;
+            }
+
+            SendMessage sendMessage = new SendMessage();
+            sendMessage.setChatId(String.valueOf(chatId));
+            sendMessage.setText(builder.toString());
+            sendMessage.setReplyMarkup(keyboard);
+            sendMessage.setProtectContent(true);
+            bot.execute(sendMessage);
+
+        } catch (Exception e) {
+            log.error("showUsersByAccessStatus failed activeAccess={} page={}", activeAccess, page, e);
         }
     }
 
@@ -2270,6 +2533,8 @@ public class TelegramService {
 
         try {
 
+            searchStoryContext.remove(chatId);
+
             int size = 10;
 
             Page<Story> stories = storyService.getStories(page, size);
@@ -2384,10 +2649,18 @@ public class TelegramService {
     }
 
     // =========================================
-    // EPISODE PACKS
+    // OPEN CUSTOM EPISODE SEARCH
+    //
+    // Story selection goes directly here.
+    // No episode pack/list is shown.
     // =========================================
 
-    private void showEpisodePacks(TelegramLongPollingBot bot, Long chatId, Long storyId, int page) {
+    private void openEpisodeSearch(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser requestingUser,
+            Long storyId
+    ) {
 
         try {
 
@@ -2395,204 +2668,238 @@ public class TelegramService {
 
             if (story == null) {
 
+                searchStoryContext.remove(chatId);
+
                 sendMessage(bot, chatId, "❌ Story not found");
 
                 return;
             }
 
-            Integer latest = episodeService.getLatestEpisodeNumber(story);
+            // Normal USER/ADMIN must not reopen an inactive story through
+            // a stale Telegram button. OWNER can still inspect it from
+            // the owner /stories library.
+            boolean owner = requestingUser != null && requestingUser.getRole() == UserRole.OWNER;
 
-            if (latest == null) {
+            if (!owner && !Boolean.TRUE.equals(story.getActive())) {
 
-                sendMessage(bot, chatId, "❌ No episodes");
+                searchStoryContext.remove(chatId);
+
+                sendMessage(bot, chatId, """
+                        ❌ This story is currently unavailable.
+
+                        Please choose another active story.
+                        """);
 
                 return;
             }
 
-            StringBuilder builder = new StringBuilder();
+            Integer latestEpisode = episodeService.getLatestEpisodeNumber(story);
 
-            builder.append("🎧 ").append(story.getTitle()).append("\n\n");
+            if (latestEpisode == null) {
 
-            builder.append("📦 Episode Packs\n\n");
+                searchStoryContext.remove(chatId);
 
-            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                sendMessage(bot, chatId, "❌ No episodes available for this story");
 
-            // =====================================
-            // ASC — EP 1 first
-            // Page 0 → 1-100
-            // Page 1 → 101-200
-            // =====================================
-
-            int startIndex = 1 + (page * 100);
-
-            int packs = 0;
-
-            for (int start = startIndex; start <= latest; start += 10) {
-
-                int end = Math.min(start + 9, latest);
-
-                builder.append("EP ").append(start).append("-").append(end).append("\n");
-
-                InlineKeyboardButton button = new InlineKeyboardButton();
-
-                button.setText("🎵 EP " + start + "-" + end);
-
-                button.setCallbackData("pack_" + storyId + "_" + start + "_" + end);
-
-                rows.add(List.of(button));
-
-                packs++;
-
-                if (packs == 10) break;
+                return;
             }
 
-            // =====================================
-            // NAVIGATION
-            // =====================================
+            searchStoryContext.put(chatId, storyId);
 
-            List<InlineKeyboardButton> nav = new ArrayList<>();
+            sendMessage(bot, chatId, """
+                    🎧 %s
 
-            // PREVIOUS
+                    🔍 Custom Episode Search
 
-            if (page > 0) {
+                    Available up to: EP %d
 
-                InlineKeyboardButton previous = new InlineKeyboardButton();
+                    Enter the episode range you need.
 
-                previous.setText("⬅️ Prev");
+                    Examples:
+                    1-50
+                    51-100
+                    120-150
 
-                previous.setCallbackData("packs_" + storyId + "_" + (page - 1));
-
-                nav.add(previous);
-            }
-
-            // SEARCH
-
-            InlineKeyboardButton search = new InlineKeyboardButton();
-
-            search.setText("🔍 Search");
-
-            search.setCallbackData("search_" + storyId);
-
-            nav.add(search);
-
-            // NEXT — more packs available?
-
-            if (startIndex + 100 <= latest) {
-
-                InlineKeyboardButton next = new InlineKeyboardButton();
-
-                next.setText("Next ➡️");
-
-                next.setCallbackData("packs_" + storyId + "_" + (page + 1));
-
-                nav.add(next);
-            }
-
-            rows.add(nav);
-
-            // BACK
-
-            InlineKeyboardButton back = new InlineKeyboardButton();
-
-            back.setText("🔙 Stories");
-
-            back.setCallbackData("stories_0");
-
-            rows.add(List.of(back));
-
-            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
-
-            keyboard.setKeyboard(rows);
-
-            SendMessage sendMessage = new SendMessage();
-
-            sendMessage.setChatId(String.valueOf(chatId));
-
-            sendMessage.setText(builder.toString());
-
-            sendMessage.setReplyMarkup(keyboard);
-
-            bot.execute(sendMessage);
+                    ⚠️ Maximum 50 episodes per search.
+                    🎵 Audio files will be sent directly.
+                    """.formatted(story.getTitle(), latestEpisode));
 
         } catch (Exception e) {
 
-            log.error("showEpisodePacks failed", e);
+            log.error("openEpisodeSearch failed storyId={}", storyId, e);
+
+            try {
+                sendMessage(bot, chatId, "❌ Unable to open episode search");
+            } catch (Exception ignore) {
+            }
         }
     }
 
     // =========================================
-    // INSIDE PACK
+    // HANDLE CUSTOM RANGE INPUT
+    //
+    // Works for USER, ADMIN and OWNER.
+    // Maximum 50 episode numbers per request.
     // =========================================
 
-    private void showEpisodesInsidePack(TelegramLongPollingBot bot, Long chatId, Long storyId, int start, int end) {
+    private void handleEpisodeRangeSearch(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser requestingUser,
+            String text
+    ) {
 
         try {
 
-            Story story = storyService.getStoryById(storyId);
+            Long storyId = searchStoryContext.get(chatId);
 
-            List<Episode> episodes = episodeService.getEpisodesByRange(story, start, end);
+            if (storyId == null) {
 
-            if (episodes.isEmpty()) {
+                sendMessage(bot, chatId, """
+                        ❌ Search Context Not Found
 
-                sendMessage(bot, chatId, "❌ No episodes");
+                        Please select a story first.
+                        """);
 
                 return;
             }
 
-            StringBuilder builder = new StringBuilder();
+            String[] split = text.split("-");
 
-            builder.append("🎧 ").append(story.getTitle()).append("\n\n");
+            int start = Integer.parseInt(split[0].trim());
+            int end = Integer.parseInt(split[1].trim());
 
-            builder.append("📦 EP ").append(start).append("-").append(end).append("\n\n");
+            if (start <= 0 || end <= 0) {
 
-            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                sendMessage(bot, chatId, """
+                        ❌ Invalid Episode Range
 
-            for (Episode episode : episodes) {
+                        Episode numbers must be greater than 0.
 
-                String epNo = episode.getEpisodeNo() != null ? episode.getEpisodeNo() : "?";
+                        Example: 20-50
+                        """);
 
-                builder.append("EP ").append(epNo).append("\n");
-
-                InlineKeyboardButton button = new InlineKeyboardButton();
-
-                button.setText("🎵 EP " + epNo);
-
-                button.setCallbackData("episode_" + episode.getId());
-
-                rows.add(List.of(button));
+                return;
             }
 
-            InlineKeyboardButton back = new InlineKeyboardButton();
+            if (start > end) {
 
-            back.setText("🔙 Back");
+                sendMessage(bot, chatId, """
+                        ❌ Invalid Range
 
-            back.setCallbackData("story_" + storyId);
+                        Start episode cannot be greater than end episode.
 
-            rows.add(List.of(back));
+                        Example: 20-50
+                        """);
 
-            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+                return;
+            }
 
-            keyboard.setKeyboard(rows);
+            long requestedCount = (long) end - start + 1;
 
-            SendMessage sendMessage = new SendMessage();
+            if (requestedCount > 50) {
 
-            sendMessage.setChatId(String.valueOf(chatId));
+                sendMessage(bot, chatId, """
+                        ❌ Search Range Too Large
 
-            sendMessage.setText(builder.toString());
+                        Maximum 50 episodes are allowed per search.
 
-            sendMessage.setReplyMarkup(keyboard);
+                        Examples:
+                        1-50
+                        51-100
+                        101-150
+                        """);
 
-            bot.execute(sendMessage);
+                return;
+            }
+
+            Story story = storyService.getStoryById(storyId);
+
+            if (story == null) {
+
+                searchStoryContext.remove(chatId);
+
+                sendMessage(bot, chatId, "❌ Story not found");
+
+                return;
+            }
+
+            boolean owner = requestingUser != null && requestingUser.getRole() == UserRole.OWNER;
+
+            if (!owner && !Boolean.TRUE.equals(story.getActive())) {
+
+                searchStoryContext.remove(chatId);
+
+                sendMessage(bot, chatId, """
+                        ❌ This story is currently unavailable.
+
+                        Please choose another active story.
+                        """);
+
+                return;
+            }
+
+            // Run the audio batch outside Telegram's update handler thread.
+            // This is important because OWNER/Admin commands (especially
+            // global-trial OFF) must still be processed while a large batch
+            // is being delivered. The worker re-checks access before every
+            // audio, so a deactivation can stop the remaining files.
+            if (!activeEpisodeBatches.add(chatId)) {
+
+                sendMessage(bot, chatId, """
+                        ⏳ Episodes are already being sent.
+
+                        Please wait for the current batch to finish or stop
+                        because of an access change before searching again.
+                        """);
+
+                return;
+            }
+
+            try {
+
+                scheduler.execute(() -> {
+                    try {
+                        sendEpisodesByRange(bot, chatId, requestingUser, story, start, end);
+                    } finally {
+                        activeEpisodeBatches.remove(chatId);
+                    }
+                });
+
+            } catch (RuntimeException e) {
+
+                activeEpisodeBatches.remove(chatId);
+                throw e;
+            }
+
+            // Keep the selected story in context so the user can
+            // immediately type another range after the current batch ends.
+
+        } catch (NumberFormatException e) {
+
+            try {
+                sendMessage(bot, chatId, "❌ Invalid range. Example: 1-50");
+            } catch (Exception ignore) {
+            }
 
         } catch (Exception e) {
 
-            log.error("showEpisodesInsidePack failed", e);
+            log.error("handleEpisodeRangeSearch failed chatId={} text={}", chatId, text, e);
         }
     }
 
     // =========================================
-    // RANGE SEARCH
+    // FORWARD PERMISSION
+    //
+    // USER        -> protected, cannot forward
+    // ADMIN/OWNER -> unprotected, can forward
     // =========================================
+
+    private boolean canForwardEpisodes(TelegramUser user) {
+
+        return user != null
+                && (user.getRole() == UserRole.ADMIN || user.getRole() == UserRole.OWNER);
+    }
 
     // =========================================
     // CUSTOM RANGE SEARCH
@@ -2606,9 +2913,11 @@ public class TelegramService {
     private void sendEpisodesByRange(
             TelegramLongPollingBot bot,
             Long chatId,
+            TelegramUser requestingUser,
             Story story,
             int start,
-            int end) {
+            int end
+    ) {
 
         try {
 
@@ -2618,28 +2927,20 @@ public class TelegramService {
 
             if (story == null) {
 
-                sendMessage(
-                        bot,
-                        chatId,
-                        "❌ Story not found"
-                );
+                sendMessage(bot, chatId, "❌ Story not found");
 
                 return;
             }
 
             if (start <= 0 || end <= 0 || start > end) {
 
-                sendMessage(
-                        bot,
-                        chatId,
-                        """
+                sendMessage(bot, chatId, """
                         ❌ Invalid Episode Range
-    
+                        
                         Example:
-    
+                        
                         20-50
-                        """
-                );
+                        """);
 
                 return;
             }
@@ -2648,19 +2949,15 @@ public class TelegramService {
 
             if (requestedCount > 50) {
 
-                sendMessage(
-                        bot,
-                        chatId,
-                        """
+                sendMessage(bot, chatId, """
                         ❌ Maximum 50 episodes
                         allowed per search.
-    
+                        
                         Example:
-    
+                        
                         1-50
                         51-100
-                        """
-                );
+                        """);
 
                 return;
             }
@@ -2669,30 +2966,17 @@ public class TelegramService {
             // GET EPISODES
             // =====================================
 
-            List<Episode> episodes =
-                    episodeService.getEpisodesByRange(
-                            story,
-                            start,
-                            end
-                    );
+            List<Episode> episodes = episodeService.getEpisodesByRange(story, start, end);
 
             if (episodes == null || episodes.isEmpty()) {
 
-                sendMessage(
-                        bot,
-                        chatId,
-                        """
+                sendMessage(bot, chatId, """
                         ❌ No episodes found
-    
+                        
                         Requested:
-    
+                        
                         EP %d - %d
-                        """
-                                .formatted(
-                                        start,
-                                        end
-                                )
-                );
+                        """.formatted(start, end));
 
                 return;
             }
@@ -2701,29 +2985,19 @@ public class TelegramService {
             // SEND START MESSAGE
             // =====================================
 
-            sendMessage(
-                    bot,
-                    chatId,
-                    """
+            sendMessage(bot, chatId, """
                     🔍 SEARCH RESULT
-    
+                    
                     🎧 %s
-    
+                    
                     📦 Range:
                     EP %d - %d
-    
+                    
                     🎵 Found:
                     %d Episodes
-    
+                    
                     Sending audio files...
-                    """
-                            .formatted(
-                                    story.getTitle(),
-                                    start,
-                                    end,
-                                    episodes.size()
-                            )
-            );
+                    """.formatted(story.getTitle(), start, end, episodes.size()));
 
             // =====================================
             // SEND EACH AUDIO DIRECTLY
@@ -2733,52 +3007,55 @@ public class TelegramService {
 
             for (Episode episode : episodes) {
 
+                // Re-check access before every audio.
+                // If OWNER disables the global free trial while a
+                // 50-episode batch is already being sent, a normal
+                // USER must stop receiving files immediately.
+                if (!subscriptionService.hasAccess(requestingUser)) {
+
+                    log.info("Episode batch stopped because access ended telegramId={} storyId={} sentCount={}",
+                            requestingUser != null ? requestingUser.getTelegramId() : null,
+                            story.getId(),
+                            sentCount);
+
+                    sendMessage(bot, chatId, """
+                            ⛔ Access Ended
+
+                            Your free trial/subscription is no longer active.
+
+                            Remaining episodes were not sent.
+                            """);
+
+                    return;
+                }
+
                 if (episode == null) {
 
                     continue;
                 }
 
-                if (episode.getTelegramFileId() == null
-                        || episode.getTelegramFileId().isBlank()) {
+                if (episode.getTelegramFileId() == null || episode.getTelegramFileId().isBlank()) {
 
-                    log.warn(
-                            "Skipping episode without fileId episodeId={} episodeNo={}",
-                            episode.getId(),
-                            episode.getEpisodeNo()
-                    );
+                    log.warn("Skipping episode without fileId episodeId={} episodeNo={}", episode.getId(), episode.getEpisodeNo());
 
                     continue;
                 }
 
                 SendAudio sendAudio = new SendAudio();
 
-                sendAudio.setChatId(
-                        String.valueOf(chatId)
-                );
+                sendAudio.setChatId(String.valueOf(chatId));
 
-                sendAudio.setAudio(
-                        new InputFile(
-                                episode.getTelegramFileId()
-                        )
-                );
+                sendAudio.setAudio(new InputFile(episode.getTelegramFileId()));
 
-                sendAudio.setCaption(
-                        """
+                sendAudio.setCaption("""
                         🎧 %s
-    
+                        
                         EP %s
-                        """
-                                .formatted(
-                                        story.getTitle(),
-                                        episode.getEpisodeNo()
-                                )
-                );
+                        """.formatted(story.getTitle(), episode.getEpisodeNo()));
 
-                // =====================================
-                // PROTECT AUDIO FOR EVERYONE
-                // =====================================
-
-                sendAudio.setProtectContent(true);
+                // USER content stays protected.
+                // ADMIN / OWNER are allowed to forward the audio.
+                sendAudio.setProtectContent(!canForwardEpisodes(requestingUser));
 
                 bot.execute(sendAudio);
 
@@ -2786,211 +3063,58 @@ public class TelegramService {
             }
 
             // =====================================
-            // SEARCH AGAIN BUTTON
+            // CHANGE STORY BUTTON
+            //
+            // Search context remains active, so the user can
+            // simply type another range without reopening a list.
             // =====================================
 
-            InlineKeyboardButton searchAgain =
-                    new InlineKeyboardButton();
+            InlineKeyboardButton back = new InlineKeyboardButton();
 
-            searchAgain.setText(
-                    "🔍 Search Again"
-            );
+            back.setText("🔙 Change Story");
 
-            searchAgain.setCallbackData(
-                    "search_" + story.getId()
-            );
+            // Return to the public story categories. Do NOT use stories_0
+            // because that callback belongs to the OWNER all-stories library.
+            back.setCallbackData("lang_tamil");
 
-            InlineKeyboardButton back =
-                    new InlineKeyboardButton();
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
 
-            back.setText(
-                    "🔙 Stories"
-            );
+            keyboard.setKeyboard(List.of(List.of(back)));
 
-            back.setCallbackData(
-                    "stories_0"
-            );
+            SendMessage completed = new SendMessage();
 
-            InlineKeyboardMarkup keyboard =
-                    new InlineKeyboardMarkup();
+            completed.setChatId(String.valueOf(chatId));
 
-            keyboard.setKeyboard(
-                    List.of(
-                            List.of(
-                                    searchAgain,
-                                    back
-                            )
-                    )
-            );
-
-            SendMessage completed =
-                    new SendMessage();
-
-            completed.setChatId(
-                    String.valueOf(chatId)
-            );
-
-            completed.setText(
-                    """
+            completed.setText("""
                     ✅ Episodes Sent
-    
+                    
                     🎵 %d audio files delivered.
-    
-                    You can search another range
-                    or go back to stories.
-                    """
-                            .formatted(sentCount)
-            );
+                    
+                    Type another range (max 50)
+                    or choose a different story.
+                    """.formatted(sentCount));
 
             completed.setReplyMarkup(keyboard);
 
-            completed.setProtectContent(true);
+            completed.setProtectContent(!canForwardEpisodes(requestingUser));
 
             bot.execute(completed);
 
         } catch (Exception e) {
 
-            log.error(
-                    "sendEpisodesByRange failed storyId={} start={} end={}",
-                    story != null ? story.getId() : null,
-                    start,
-                    end,
-                    e
-            );
+            log.error("sendEpisodesByRange failed storyId={} start={} end={}", story != null ? story.getId() : null, start, end, e);
 
             try {
 
-                sendMessage(
-                        bot,
-                        chatId,
-                        """
+                sendMessage(bot, chatId, """
                         ❌ Failed to send episodes.
-    
+                        
                         Please try again.
-                        """
-                );
+                        """);
 
             } catch (Exception ignore) {
 
             }
-        }
-    }
-
-    private void showEpisodesByRange(TelegramLongPollingBot bot, Long chatId, Story story, int start, int end) {
-
-        try {
-
-            List<Episode> episodes = episodeService.getEpisodesByRange(story, start, end);
-
-            if (episodes.isEmpty()) {
-
-                sendMessage(bot, chatId, "❌ No episodes found");
-
-                return;
-            }
-
-            StringBuilder builder = new StringBuilder();
-
-            builder.append("🎧 ").append(story.getTitle()).append("\n\n");
-
-            builder.append("🔍 SEARCH RESULT\n\n");
-
-            builder.append("EP ").append(start).append("-").append(end).append("\n\n");
-
-            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
-            for (Episode episode : episodes) {
-
-                String epNo = episode.getEpisodeNo();
-
-                builder.append("EP ").append(epNo).append("\n");
-
-                InlineKeyboardButton button = new InlineKeyboardButton();
-
-                button.setText("🎵 EP " + epNo);
-
-                button.setCallbackData("episode_" + episode.getId());
-
-                rows.add(List.of(button));
-            }
-
-            // =====================================
-            // SEARCH AGAIN + BACK — same row
-            // =====================================
-
-            InlineKeyboardButton searchAgain = new InlineKeyboardButton();
-
-            searchAgain.setText("🔍 Search Again");
-
-            searchAgain.setCallbackData("search_" + story.getId());
-
-            InlineKeyboardButton back = new InlineKeyboardButton();
-
-            back.setText("🔙 Stories");
-
-            back.setCallbackData("stories_0");
-
-            rows.add(List.of(searchAgain, back));
-
-            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
-
-            keyboard.setKeyboard(rows);
-
-            SendMessage sendMessage = new SendMessage();
-
-            sendMessage.setChatId(String.valueOf(chatId));
-
-            sendMessage.setText(builder.toString());
-
-            sendMessage.setReplyMarkup(keyboard);
-
-            bot.execute(sendMessage);
-
-        } catch (Exception e) {
-
-            log.error("showEpisodesByRange failed", e);
-        }
-    }
-
-    // =========================================
-    // SEND EPISODE AUDIO
-    // =========================================
-
-    private void sendEpisodeAudio(TelegramLongPollingBot bot, Long chatId, Long episodeId) {
-
-        try {
-
-            Episode episode = episodeService.getEpisodeById(episodeId);
-
-            if (episode == null) {
-
-                sendMessage(bot, chatId, "❌ Episode not found");
-
-                return;
-            }
-
-            TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
-
-            SendAudio sendAudio = new SendAudio();
-
-            sendAudio.setChatId(String.valueOf(chatId));
-
-            sendAudio.setAudio(new InputFile(episode.getTelegramFileId()));
-
-            sendAudio.setCaption("🎧 EP " + episode.getEpisodeNo());
-
-            // =====================================
-            // PREVENT FORWARD FOR NORMAL USERS
-            // OWNER & ADMIN CAN FORWARD
-            // =====================================
-
-            sendAudio.setProtectContent(shouldProtectContent(user));
-            sendAudio.setProtectContent(true);
-            bot.execute(sendAudio);
-
-        } catch (Exception e) {
-
-            log.error("sendEpisodeAudio failed", e);
         }
     }
 
@@ -3006,9 +3130,6 @@ public class TelegramService {
 
         sendMessage.setText(text);
 
-        TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
-
-        sendMessage.setProtectContent(shouldProtectContent(user));
         sendMessage.setProtectContent(true);
 
         return bot.execute(sendMessage);
@@ -3036,37 +3157,15 @@ public class TelegramService {
         }, 48, TimeUnit.HOURS); // MAX 48 hours — Telegram limit
     }
 
-    // =========================================
-    // CONTENT PROTECTION
-    //
-    // EVERYONE:
-    // OWNER
-    // ADMIN
-    // USER
-    // TRIAL
-    // SUBSCRIBER
-    //
-    // FORWARD / SAVE / DOWNLOAD BLOCKED
-    // =========================================
-
-    private boolean shouldProtectContent(TelegramUser user) {
-
-        return true;
-    }
-
-    private void syncStories(TelegramLongPollingBot bot,
-                             Long chatId) {
+    private void syncStories(TelegramLongPollingBot bot, Long chatId) {
 
         try {
 
-            List<Story> stories =
-                    storyService.getAllStories();
+            List<Story> stories = storyService.getAllStories();
 
             if (stories.isEmpty()) {
 
-                sendMessage(bot,
-                        chatId,
-                        "❌ No stories found.");
+                sendMessage(bot, chatId, "❌ No stories found.");
 
                 return;
             }
@@ -3078,36 +3177,23 @@ public class TelegramService {
 
                 try {
 
-                    GetChat getChat =
-                            new GetChat(
-                                    String.valueOf(
-                                            story.getTelegramChatId()));
+                    GetChat getChat = new GetChat(String.valueOf(story.getTelegramChatId()));
 
-                    var chat =
-                            bot.execute(getChat);
+                    var chat = bot.execute(getChat);
 
-                    boolean completed =
-                            chat.getDescription() != null &&
-                                    chat.getDescription()
-                                            .toLowerCase()
-                                            .contains("completed");
+                    boolean completed = chat.getDescription() != null && chat.getDescription().toLowerCase().contains("completed");
 
                     story.setTitle(chat.getTitle());
 
-                    story.setTelegramUsername(
-                            chat.getUserName());
+                    story.setTelegramUsername(chat.getUserName());
 
-                    story.setChatType(
-                            chat.getType());
+                    story.setChatType(chat.getType());
 
-                    story.setDescription(
-                            chat.getDescription());
+                    story.setDescription(chat.getDescription());
 
-                    story.setInviteLink(
-                            chat.getInviteLink());
+                    story.setInviteLink(chat.getInviteLink());
 
-                    story.setIsCompleted(
-                            completed);
+                    story.setIsCompleted(completed);
 
                     story.setActive(true);
 
@@ -3117,9 +3203,7 @@ public class TelegramService {
 
                 } catch (Exception ex) {
 
-                    log.warn(
-                            "Channel deleted/not accessible chatId={}",
-                            story.getTelegramChatId());
+                    log.warn("Channel deleted/not accessible chatId={}", story.getTelegramChatId());
 
                     story.setActive(false);
 
@@ -3129,19 +3213,13 @@ public class TelegramService {
                 }
             }
 
-            sendMessage(bot,
-                    chatId,
-                    """
+            sendMessage(bot, chatId, """
                     ✅ Story Sync Completed
-    
+                    
                     📚 Total Stories : %d
                     ✅ Updated       : %d
                     ❌ Inactive      : %d
-                    """
-                            .formatted(
-                                    stories.size(),
-                                    updated,
-                                    deleted));
+                    """.formatted(stories.size(), updated, deleted));
 
         } catch (Exception e) {
 
@@ -3149,9 +3227,7 @@ public class TelegramService {
 
             try {
 
-                sendMessage(bot,
-                        chatId,
-                        "❌ Sync failed.");
+                sendMessage(bot, chatId, "❌ Sync failed.");
 
             } catch (Exception ignore) {
 
@@ -3159,8 +3235,7 @@ public class TelegramService {
         }
     }
 
-    private void deleteInactiveStories(TelegramLongPollingBot bot,
-                                       Long chatId) {
+    private void deleteInactiveStories(TelegramLongPollingBot bot, Long chatId) {
 
         try {
 
@@ -3168,9 +3243,7 @@ public class TelegramService {
 
             if (stories.isEmpty()) {
 
-                sendMessage(bot,
-                        chatId,
-                        """
+                sendMessage(bot, chatId, """
                         ✅ No inactive stories found.
                         """);
 
@@ -3188,14 +3261,11 @@ public class TelegramService {
                 deleted++;
             }
 
-            sendMessage(bot,
-                    chatId,
-                    """
+            sendMessage(bot, chatId, """
                     ✅ Inactive Story Cleanup Completed
-    
+                    
                     🗑 Deleted Stories : %d
-                    """
-                            .formatted(deleted));
+                    """.formatted(deleted));
 
         } catch (Exception e) {
 
@@ -3203,9 +3273,7 @@ public class TelegramService {
 
             try {
 
-                sendMessage(bot,
-                        chatId,
-                        "❌ Failed to delete inactive stories.");
+                sendMessage(bot, chatId, "❌ Failed to delete inactive stories.");
 
             } catch (Exception ignore) {
 

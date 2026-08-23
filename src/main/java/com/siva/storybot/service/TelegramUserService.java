@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.telegram.telegrambots.meta.api.objects.User;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Slf4j
 @Service
@@ -62,6 +63,15 @@ public class TelegramUserService {
             if (existingUser != null) {
 
                 updateExistingUser(existingUser, telegramApiUser, chatId);
+
+                // The configured bot owner must always retain OWNER role,
+                // even if an older database row was created with USER/ADMIN.
+                if (telegramConfig.getOwnerId() != null
+                        && telegramId.equals(telegramConfig.getOwnerId())
+                        && existingUser.getRole() != UserRole.OWNER) {
+
+                    existingUser.setRole(UserRole.OWNER);
+                }
 
                 TelegramUser savedUser = telegramUserRepository.save(existingUser);
 
@@ -196,6 +206,17 @@ public class TelegramUserService {
         int safeSize = Math.max(size, 1);
 
         return telegramUserRepository.findByRoleNotOrderByLastActiveAtDesc(UserRole.OWNER, PageRequest.of(safePage, safeSize));
+    }
+
+    // =========================================
+    // ALL NON-OWNER USERS
+    //
+    // Used by owner active/expired access views.
+    // =========================================
+
+    public List<TelegramUser> getAllNonOwnerUsers() {
+
+        return telegramUserRepository.findByRoleNotOrderByLastActiveAtDesc(UserRole.OWNER);
     }
 
     // =========================================

@@ -133,9 +133,9 @@ public class TelegramCommandService {
 
                 new BotCommand("userdetails", "View user details"),
 
-                new BotCommand("activeusers", "View active subscribed users"),
+                new BotCommand("activeusers", "View users with current access"),
 
-                new BotCommand("expiredusers", "View expired users"),
+                new BotCommand("expiredusers", "View users without current access"),
 
                 // =================================
                 // SUBSCRIPTION MANAGEMENT

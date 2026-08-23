@@ -22,7 +22,6 @@ import org.telegram.telegrambots.meta.api.objects.Audio;
 import org.telegram.telegrambots.meta.api.objects.Message;
 
 import java.time.LocalDateTime;
-import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -53,6 +52,9 @@ public class EpisodeService {
     private String groqUrl;
     @Value("${groq.model}")
     private String model;
+
+    @Value("${groq.episode-detection.enabled:false}")
+    private boolean groqEpisodeDetectionEnabled;
 
     // =====================================
     // SAVE EPISODE
@@ -217,6 +219,16 @@ public class EpisodeService {
 
         try {
 
+            if (!groqEpisodeDetectionEnabled) {
+                log.debug("Groq episode detection is disabled");
+                return;
+            }
+
+            if (apiKey == null || apiKey.isBlank()) {
+                log.warn("Groq episode detection skipped because GROQ_API_KEY is not configured");
+                return;
+            }
+
             List<Episode> episodes = episodeRepository.findByIsEpisodeDetectedFalse();
 
             if (episodes.isEmpty()) {
@@ -322,12 +334,12 @@ public class EpisodeService {
 
     public List<Episode> getEpisodesByRange(Story story, int start, int end) {
 
-        return episodeRepository.findByStory(story).stream().filter(episode -> {
+        if (story == null || start <= 0 || end < start) {
+            return List.of();
+        }
 
-            Integer value = episode.getEpisodeNoNumeric();
-
-            return value != null && value >= start && value <= end;
-        }).sorted(Comparator.comparingInt(Episode::getEpisodeNoNumeric)).toList();
+        return episodeRepository
+                .findTop50ByStoryAndEpisodeNoNumericBetweenOrderByEpisodeNoNumericAsc(story, start, end);
     }
 
     // =====================================

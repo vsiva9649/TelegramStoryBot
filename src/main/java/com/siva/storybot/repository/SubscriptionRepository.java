@@ -21,4 +21,9 @@ public interface SubscriptionRepository extends JpaRepository<Subscription, Long
 
     Optional<Subscription> findTopByTelegramUserAndStatusOrderByExpiryDateDesc(TelegramUser telegramUser, SubscriptionStatus status);
 
+    List<Subscription> findAllByTelegramUserAndStatusOrderByExpiryDateDesc(
+            TelegramUser telegramUser,
+            SubscriptionStatus status
+    );
+
 }
