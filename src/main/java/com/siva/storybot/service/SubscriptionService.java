@@ -27,6 +27,8 @@ public class SubscriptionService {
 
     private final GlobalTrialService globalTrialService;
 
+    private final RewardTrialService rewardTrialService;
+
     // =========================================
     // COMPLETE ACCESS CHECK
     //
@@ -35,8 +37,9 @@ public class SubscriptionService {
     // 1. OWNER / ADMIN
     // 2. ACTIVE NORMAL SUBSCRIPTION
     // 3. MANUAL FREE TRIAL SUBSCRIPTION
-    // 4. GLOBAL FREE TRIAL
-    // 5. DENY
+    // 4. REWARDED 1-HOUR FREE ACCESS
+    // 5. GLOBAL FREE TRIAL
+    // 6. DENY
     // =========================================
 
     public boolean hasAccess(TelegramUser telegramUser) {
@@ -67,6 +70,18 @@ public class SubscriptionService {
             if (hasActiveSubscription(telegramUser)) {
 
                 log.debug("Access granted telegramId={} source=SUBSCRIPTION",
+                        telegramUser.getTelegramId());
+
+                return true;
+            }
+
+            // =====================================
+            // REWARDED 1-HOUR FREE ACCESS
+            // =====================================
+
+            if (rewardTrialService.hasActiveRewardTrial(telegramUser)) {
+
+                log.debug("Access granted telegramId={} source=REWARD_TRIAL",
                         telegramUser.getTelegramId());
 
                 return true;

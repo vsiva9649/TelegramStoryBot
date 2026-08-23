@@ -32,6 +32,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.Keyboard
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,8 +61,15 @@ public class TelegramService {
     private final StoryService storyService;
 
     private final EpisodeService episodeService;
+
+    private final EpisodeUsageService episodeUsageService;
+
+    private final RewardTrialService rewardTrialService;
     private final Map<Long, Long> searchStoryContext = new ConcurrentHashMap<>();
     private final Set<Long> activeEpisodeBatches = ConcurrentHashMap.newKeySet();
+
+    private static final int MAX_EPISODES_PER_SEARCH = 50;
+    private static final int AUTO_DELETE_HOURS = 24;
 
     // =========================================
     // SCHEDULER
@@ -120,7 +128,9 @@ public class TelegramService {
 
         try {
 
-            Message botMessage = sendMessage(bot, chatId, """
+            SendMessage sendMessage = new SendMessage();
+            sendMessage.setChatId(String.valueOf(chatId));
+            sendMessage.setText("""
                     🔒 Subscription Required
                     
                     Your free access or subscription
@@ -132,9 +142,20 @@ public class TelegramService {
                     👑 Please Contact Admin
                     """);
 
-            if (userMessageId != null) {
+            if (rewardTrialService.isEnabled()) {
+                InlineKeyboardButton reward = new InlineKeyboardButton();
+                reward.setText("🎁 Get 1 Hour Free");
+                reward.setCallbackData("reward_start");
 
-                autoDeleteMessages(bot, chatId, userMessageId, botMessage.getMessageId());
+                InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+                keyboard.setKeyboard(List.of(List.of(reward)));
+                sendMessage.setReplyMarkup(keyboard);
+            }
+
+            executeSendMessage(bot, chatId, sendMessage);
+
+            if (userMessageId != null) {
+                autoDeleteUserMessage(bot, chatId, userMessageId);
             }
 
         } catch (Exception e) {
@@ -313,13 +334,6 @@ public class TelegramService {
 
             log.info("Private chat detected");
 
-            if (!message.hasText()) {
-
-                log.warn("Private message has no text");
-
-                return;
-            }
-
             var telegramApiUser = message.getFrom();
 
             if (telegramApiUser == null) {
@@ -329,9 +343,80 @@ public class TelegramService {
                 return;
             }
 
+            TelegramUser telegramUser = telegramUserService.saveOrUpdateUser(telegramApiUser, chatId);
+
+            // =====================================
+            // NORMAL USER INPUT POLICY
+            //
+            // Telegram does not provide a Bot API switch to hide the native
+            // attachment/poll UI in a private chat. Enforce the rule on the
+            // server instead: USER may send text only. Any photo, document,
+            // audio, voice, video, sticker, poll, location, contact, etc. is
+            // deleted immediately and is never processed by the bot.
+            //
+            // ADMIN / OWNER are not restricted by this input policy.
+            // =====================================
+
+            if (!message.hasText()) {
+
+                if (isNormalUser(telegramUser)) {
+                    rejectNonTextUserMessage(bot, chatId, message);
+                } else {
+                    log.info("Ignoring non-text private message from privileged user telegramId={} role={}",
+                            telegramUser.getTelegramId(), telegramUser.getRole());
+                }
+
+                return;
+            }
+
             String text = message.getText().trim();
 
-            TelegramUser telegramUser = telegramUserService.saveOrUpdateUser(telegramApiUser, chatId);
+            // =====================================
+            // REWARDED 1-HOUR FREE ACCESS
+            //
+            // This must be handled BEFORE the normal access gate,
+            // otherwise an expired USER would never be able to request
+            // the reward link.
+            // =====================================
+
+            if (text.equalsIgnoreCase("🎁 Get 1 Hour Free")
+                    || text.equalsIgnoreCase("/reward")
+                    || text.equalsIgnoreCase("/freehour")) {
+
+                handleRewardTrialRequest(bot, chatId, telegramUser);
+                return;
+            }
+
+            // =====================================
+            // SHRTFLY -> DIRECT TELEGRAM DEEP LINK
+            //
+            // ShrtFly's final destination is now:
+            // https://t.me/<bot>?start=rw_<ONE_TIME_TOKEN>
+            //
+            // This handler runs BEFORE the normal access gate so an expired
+            // USER can return from ShrtFly and claim the reward. The token is
+            // DB-locked, one-time, time-limited, and bound to the Telegram
+            // account that originally requested it.
+            // =====================================
+
+            String startPayload = extractStartPayload(text);
+
+            if (rewardTrialService.isRewardStartPayload(startPayload)) {
+                handleDirectRewardClaim(bot, chatId, telegramUser, startPayload);
+                return;
+            }
+
+            // Legacy deep-link payloads are kept only for compatibility with
+            // old messages. They never activate access by themselves.
+            if ("reward_success".equalsIgnoreCase(startPayload)) {
+                handleRewardSuccessReturn(bot, chatId, telegramUser);
+                return;
+            }
+
+            if ("reward_retry".equalsIgnoreCase(startPayload)) {
+                handleRewardTrialRequest(bot, chatId, telegramUser);
+                return;
+            }
 
             // =====================================
             // COMPLETE ACCESS CHECK
@@ -523,14 +608,36 @@ public class TelegramService {
 
             String trialInfo = "";
 
-            if (user != null && !subscriptionService.hasActiveSubscription(user) && globalTrialService.hasGlobalTrialAccess(user)) {
+            DateTimeFormatter displayFormatter =
+                    DateTimeFormatter.ofPattern("dd-MM-yyyy • hh:mm a");
 
-                trialInfo = globalTrialService.getUserTrialExpiry(user).map(expiry -> """
-                        
-                        🎁 Free Trial Active
-                        ⏳ Valid Until:
-                        %s
-                        """.formatted(expiry)).orElse("");
+            if (user != null && rewardTrialService.hasActiveRewardTrial(user)) {
+
+                trialInfo = rewardTrialService
+                        .getRewardExpiry(user)
+                        .map(expiry -> """
+
+                    🎁 1 Hour Reward Access Active
+                    ⏳ Valid Until: %s
+                    """.formatted(
+                                expiry.format(displayFormatter)
+                        ))
+                        .orElse("");
+
+            } else if (user != null
+                    && !subscriptionService.hasActiveSubscription(user)
+                    && globalTrialService.hasGlobalTrialAccess(user)) {
+
+                trialInfo = globalTrialService
+                        .getUserTrialExpiry(user)
+                        .map(expiry -> """
+
+                    🎁 Free Trial Active
+                    ⏳ Valid Until: %s
+                    """.formatted(
+                                expiry.format(displayFormatter)
+                        ))
+                        .orElse("");
             }
 
             SendMessage sendMessage = new SendMessage();
@@ -566,11 +673,23 @@ public class TelegramService {
 
             rows.add(row1);
 
+            if (user != null
+                    && isNormalUser(user)
+                    && rewardTrialService.isEnabled()
+                    && !rewardTrialService.hasActiveRewardTrial(user)
+                    && !subscriptionService.hasActiveSubscription(user)
+                    && !globalTrialService.hasGlobalTrialAccess(user)) {
+
+                KeyboardRow rewardRow = new KeyboardRow();
+                rewardRow.add("🎁 Get 1 Hour Free");
+                rows.add(rewardRow);
+            }
+
             keyboard.setKeyboard(rows);
 
             sendMessage.setReplyMarkup(keyboard);
 
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
 
@@ -638,7 +757,7 @@ public class TelegramService {
 
             sendMessage.setReplyMarkup(keyboard);
 
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
 
@@ -802,7 +921,7 @@ public class TelegramService {
 
             sendMessage.setReplyMarkup(keyboard);
 
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
 
@@ -833,6 +952,24 @@ public class TelegramService {
                 user = telegramUserService.getUserByTelegramId(chatId);
             }
 
+            String data = callbackQuery.getData();
+
+            log.info("Callback received={}", data);
+
+            // =====================================
+            // REWARD CALLBACKS MUST BYPASS ACCESS GATE
+            // =====================================
+
+            if ("reward_start".equals(data)) {
+                if (user == null) {
+                    sendSubscriptionRequiredMessage(bot, chatId, messageId);
+                    return;
+                }
+
+                handleRewardTrialRequest(bot, chatId, user);
+                return;
+            }
+
             // =====================================
             // COMPLETE CALLBACK ACCESS CHECK
             // =====================================
@@ -854,10 +991,6 @@ public class TelegramService {
 
                 return;
             }
-
-            String data = callbackQuery.getData();
-
-            log.info("Callback received={}", data);
             if ("ignore".equals(data)) {
 
                 return;
@@ -1101,6 +1234,296 @@ public class TelegramService {
 
             log.error("handleCallbackQuery failed", e);
         }
+    }
+
+    // =========================================
+    // REWARDED 1-HOUR FREE ACCESS
+    // =========================================
+
+    private void handleRewardTrialRequest(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user
+    ) {
+
+        try {
+            searchStoryContext.remove(chatId);
+
+            if (user == null) {
+                sendMessage(bot, chatId, "❌ User not found. Please send /start again.");
+                return;
+            }
+
+            if (!isNormalUser(user)) {
+                sendMessage(bot, chatId, """
+                        ℹ️ OWNER / ADMIN accounts already have unrestricted access.
+                        Reward trial is only for normal users.
+                        """);
+                return;
+            }
+
+            if (!rewardTrialService.isEnabled()) {
+                sendMessage(bot, chatId, """
+                        🚧 1 Hour Free Access is currently unavailable.
+
+                        Please contact the admin for access.
+                        """);
+                return;
+            }
+
+            if (rewardTrialService.hasActiveRewardTrial(user)) {
+                String expiry = rewardTrialService.getRewardExpiry(user)
+                        .map(Object::toString)
+                        .orElse("soon");
+
+                sendMessage(bot, chatId, """
+                        ✅ Your 1 Hour Free Access is already active.
+
+                        ⏳ Valid Until:
+                        %s
+                        """.formatted(expiry));
+                return;
+            }
+
+            // A paid/manual/global access period should not be extended by
+            // claiming a reward in parallel. Reward can be requested after
+            // the current access source ends.
+            if (subscriptionService.hasActiveSubscription(user)
+                    || globalTrialService.hasGlobalTrialAccess(user)) {
+
+                sendMessage(bot, chatId, """
+                        ✅ You already have active access.
+
+                        The 1-hour reward can be requested after your current access expires.
+                        """);
+                return;
+            }
+
+            RewardTrialService.RewardLinkResult result =
+                    rewardTrialService.createOrReuseRewardLink(user);
+
+            InlineKeyboardButton openAds = new InlineKeyboardButton();
+            openAds.setText("▶️ Complete Ads & Unlock 1 Hour");
+            openAds.setUrl(result.shortUrl());
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(List.of(List.of(openAds)));
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("""
+                    🎁 Get 1 Hour Free Access
+
+                    1. Tap the button below.
+                    2. Complete all required ShrtFly ad steps.
+                    3. After the final step, Telegram will open this bot.
+                    4. If Telegram shows a Start button, tap Start.
+                    5. The same Telegram account will receive exactly 60 minutes of access.
+
+                    🔐 This reward link is one-time and expires in %d minutes.
+                    🔒 Forwarding the link to another account will not activate it.
+                    """.formatted(RewardTrialService.REWARD_LINK_MINUTES));
+            message.setReplyMarkup(keyboard);
+
+            executeSendMessage(bot, chatId, message);
+
+        } catch (Exception e) {
+            log.error("handleRewardTrialRequest failed telegramId={}",
+                    user != null ? user.getTelegramId() : null, e);
+
+            try {
+                sendMessage(bot, chatId, """
+                        ❌ Unable to create the 1-hour reward link right now.
+
+                        Please try again later or contact the admin.
+                        """);
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    private void handleDirectRewardClaim(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user,
+            String startPayload
+    ) {
+        try {
+            searchStoryContext.remove(chatId);
+
+            if (user == null) {
+                sendMessage(bot, chatId, "❌ User not found. Please open the reward link again.");
+                return;
+            }
+
+            if (!isNormalUser(user)) {
+                sendMessage(bot, chatId, "✅ OWNER / ADMIN access is already unrestricted.");
+                showMainMenu(bot, chatId);
+                return;
+            }
+
+            // Do not stack a reward on top of manual/paid/global access if the
+            // user's access situation changed after the short link was created.
+            if (subscriptionService.hasActiveSubscription(user)
+                    || globalTrialService.hasGlobalTrialAccess(user)) {
+
+                sendMessage(bot, chatId, """
+                        ✅ You already have active access.
+
+                        The 1-hour reward was not started, so your reward time is not wasted.
+                        """);
+                showMainMenu(bot, chatId);
+                return;
+            }
+
+            RewardTrialService.ActivationResult result =
+                    rewardTrialService.activateByStartPayload(startPayload, user);
+
+            if (!result.success()) {
+                SendMessage message = new SendMessage();
+                message.setChatId(String.valueOf(chatId));
+                message.setText("""
+                        ❌ Unable to activate the 1-hour reward.
+
+                        %s
+                        """.formatted(result.message()));
+
+                if (rewardTrialService.isEnabled()) {
+                    InlineKeyboardButton retry = new InlineKeyboardButton();
+                    retry.setText("🎁 Get New 1 Hour Link");
+                    retry.setCallbackData("reward_start");
+
+                    InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+                    keyboard.setKeyboard(List.of(List.of(retry)));
+                    message.setReplyMarkup(keyboard);
+                }
+
+                executeSendMessage(bot, chatId, message);
+                return;
+            }
+
+            String expiry = result.accessExpiresAt() == null
+                    ? "soon"
+                    : result.accessExpiresAt().format(
+                            DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a")
+                    );
+
+            String heading = result.alreadyActive()
+                    ? "✅ Your 1 Hour Free Access is already active!"
+                    : "🎉 1 Hour Free Access Activated!";
+
+            sendMessage(bot, chatId, """
+                    %s
+
+                    ✅ ShrtFly reward verified through your one-time Telegram link.
+                    ⏳ Valid until: %s
+
+                    You can now choose a story and listen to episodes.
+                    """.formatted(heading, expiry));
+
+            showMainMenu(bot, chatId);
+
+        } catch (Exception e) {
+            log.error(
+                    "handleDirectRewardClaim failed telegramId={}",
+                    user != null ? user.getTelegramId() : null,
+                    e
+            );
+
+            try {
+                sendMessage(bot, chatId, """
+                        ❌ Unable to activate the reward right now.
+
+                        Please request a new 1-hour link and try again.
+                        """);
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    private void handleRewardSuccessReturn(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user
+    ) {
+        try {
+            searchStoryContext.remove(chatId);
+
+            if (user == null) {
+                sendMessage(bot, chatId, "❌ User not found. Please send /start again.");
+                return;
+            }
+
+            if (!isNormalUser(user)) {
+                sendMessage(bot, chatId, "✅ OWNER / ADMIN access is already unrestricted.");
+                showMainMenu(bot, chatId);
+                return;
+            }
+
+            var activeReward = rewardTrialService.getActiveRewardTrial(user);
+
+            if (activeReward.isEmpty()) {
+                SendMessage message = new SendMessage();
+                message.setChatId(String.valueOf(chatId));
+                message.setText("""
+                        ❌ No active 1-hour reward was found.
+
+                        The web return link itself cannot activate access.
+                        Please complete a valid reward link and try again.
+                        """);
+
+                if (rewardTrialService.isEnabled()) {
+                    InlineKeyboardButton retry = new InlineKeyboardButton();
+                    retry.setText("🎁 Get 1 Hour Free");
+                    retry.setCallbackData("reward_start");
+
+                    InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+                    keyboard.setKeyboard(List.of(List.of(retry)));
+                    message.setReplyMarkup(keyboard);
+                }
+
+                executeSendMessage(bot, chatId, message);
+                return;
+            }
+
+            String expiry = activeReward.get().getExpiresAt()
+                    .format(DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a"));
+
+            sendMessage(bot, chatId, """
+                    🎉 1 Hour Free Access is Active!
+
+                    ✅ Reward verified successfully.
+                    ⏳ Valid until: %s
+
+                    You can now choose a story and listen to episodes.
+                    """.formatted(expiry));
+
+            showMainMenu(bot, chatId);
+
+        } catch (Exception e) {
+            log.error("handleRewardSuccessReturn failed telegramId={}",
+                    user != null ? user.getTelegramId() : null, e);
+        }
+    }
+
+    private String extractStartPayload(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+
+        String[] parts = text.trim().split("\\s+", 2);
+        String command = parts[0];
+
+        int mentionIndex = command.indexOf('@');
+        if (mentionIndex >= 0) {
+            command = command.substring(0, mentionIndex);
+        }
+
+        if (!"/start".equalsIgnoreCase(command) || parts.length < 2) {
+            return "";
+        }
+
+        return parts[1].trim();
     }
 
     // =========================================
@@ -2088,7 +2511,10 @@ public class TelegramService {
         }
 
         boolean subscriptionActive = subscriptionService.hasActiveSubscription(user);
-        boolean globalTrialActive = !subscriptionActive && globalTrialService.hasGlobalTrialAccess(user);
+        boolean rewardTrialActive = !subscriptionActive && rewardTrialService.hasActiveRewardTrial(user);
+        boolean globalTrialActive = !subscriptionActive
+                && !rewardTrialActive
+                && globalTrialService.hasGlobalTrialAccess(user);
 
         String accessSource;
 
@@ -2096,6 +2522,8 @@ public class TelegramService {
             accessSource = "ROLE BYPASS";
         } else if (subscriptionActive) {
             accessSource = "SUBSCRIPTION";
+        } else if (rewardTrialActive) {
+            accessSource = "REWARD TRIAL (1 HOUR)";
         } else if (globalTrialActive) {
             accessSource = "GLOBAL TRIAL";
         } else {
@@ -2113,6 +2541,9 @@ public class TelegramService {
         String latestStatus = latest == null ? "-" : String.valueOf(latest.getStatus());
         String latestStart = latest == null ? "-" : String.valueOf(latest.getStartDate());
         String latestExpiry = latest == null ? "-" : String.valueOf(latest.getExpiryDate());
+        String rewardExpiry = rewardTrialService.getRewardExpiry(user)
+                .map(Object::toString)
+                .orElse("-");
 
         sendMessage(bot, chatId, """
                 👤 USER DETAILS
@@ -2128,6 +2559,7 @@ public class TelegramService {
                 📌 Latest Status: %s
                 📅 Start: %s
                 ⏳ Expiry: %s
+                🎁 Reward Expiry: %s
 
                 🕒 Joined: %s
                 🕒 Last Active: %s
@@ -2142,6 +2574,7 @@ public class TelegramService {
                 latestStatus,
                 latestStart,
                 latestExpiry,
+                rewardExpiry,
                 user.getJoinedAt(),
                 user.getLastActiveAt()
         ));
@@ -2240,8 +2673,7 @@ public class TelegramService {
             sendMessage.setChatId(String.valueOf(chatId));
             sendMessage.setText(builder.toString());
             sendMessage.setReplyMarkup(keyboard);
-            sendMessage.setProtectContent(true);
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
             log.error("showUsersByAccessStatus failed activeAccess={} page={}", activeAccess, page, e);
@@ -2365,7 +2797,7 @@ public class TelegramService {
 
             sendMessage.setReplyMarkup(keyboard);
 
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
 
@@ -2517,7 +2949,7 @@ public class TelegramService {
                 sendMessage.setReplyMarkup(keyboard);
             }
 
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
 
@@ -2640,7 +3072,7 @@ public class TelegramService {
 
             sendMessage.setReplyMarkup(keyboard);
 
-            bot.execute(sendMessage);
+            executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
 
@@ -2706,6 +3138,19 @@ public class TelegramService {
 
             searchStoryContext.put(chatId, storyId);
 
+            String usageInfo = requestingUser != null && requestingUser.getRole() == UserRole.USER
+                    ? """
+
+                    👤 USER Limits:
+                    • Max 50 per search
+                    • Max 200 per hour
+                    • Max 250 per day
+                    """
+                    : """
+
+                    👑 ADMIN / OWNER: Unlimited usage
+                    """;
+
             sendMessage(bot, chatId, """
                     🎧 %s
 
@@ -2721,8 +3166,8 @@ public class TelegramService {
                     120-150
 
                     ⚠️ Maximum 50 episodes per search.
-                    🎵 Audio files will be sent directly.
-                    """.formatted(story.getTitle(), latestEpisode));
+                    🎵 Audio files will be sent directly.%s
+                    """.formatted(story.getTitle(), latestEpisode, usageInfo));
 
         } catch (Exception e) {
 
@@ -2797,7 +3242,7 @@ public class TelegramService {
 
             long requestedCount = (long) end - start + 1;
 
-            if (requestedCount > 50) {
+            if (requestedCount > MAX_EPISODES_PER_SEARCH) {
 
                 sendMessage(bot, chatId, """
                         ❌ Search Range Too Large
@@ -2901,6 +3346,61 @@ public class TelegramService {
                 && (user.getRole() == UserRole.ADMIN || user.getRole() == UserRole.OWNER);
     }
 
+    private boolean isNormalUser(TelegramUser user) {
+        return user != null && user.getRole() == UserRole.USER;
+    }
+
+    private void sendEpisodeLimitMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            EpisodeUsageService.EpisodeQuota quota,
+            int sentInCurrentBatch
+    ) throws Exception {
+
+        if (quota == null) {
+            return;
+        }
+
+        String limitMessage;
+
+        if ("DAILY_LIMIT".equals(quota.reason())) {
+            limitMessage = """
+                    ⛔ Daily Episode Limit Reached
+
+                    Today: %d / %d episodes used.
+                    %s
+
+                    You can continue after the daily counter resets.
+                    """.formatted(
+                    quota.dailyUsed(),
+                    EpisodeUsageService.MAX_EPISODES_PER_DAY,
+                    sentInCurrentBatch > 0
+                            ? "This batch delivered " + sentInCurrentBatch + " episode(s) before the limit was reached."
+                            : "No more episodes can be sent today."
+            );
+        } else {
+            limitMessage = """
+                    ⛔ Hourly Episode Limit Reached
+
+                    Current 60-minute window: %d / %d episodes used.
+                    Daily usage: %d / %d.
+                    %s
+
+                    You can continue after the hourly window resets.
+                    """.formatted(
+                    quota.hourlyUsed(),
+                    EpisodeUsageService.MAX_EPISODES_PER_HOUR,
+                    quota.dailyUsed(),
+                    EpisodeUsageService.MAX_EPISODES_PER_DAY,
+                    sentInCurrentBatch > 0
+                            ? "This batch delivered " + sentInCurrentBatch + " episode(s) before the limit was reached."
+                            : "No more episodes can be sent in the current hourly window."
+            );
+        }
+
+        sendMessage(bot, chatId, limitMessage);
+    }
+
     // =========================================
     // CUSTOM RANGE SEARCH
     //
@@ -2947,7 +3447,7 @@ public class TelegramService {
 
             int requestedCount = end - start + 1;
 
-            if (requestedCount > 50) {
+            if (requestedCount > MAX_EPISODES_PER_SEARCH) {
 
                 sendMessage(bot, chatId, """
                         ❌ Maximum 50 episodes
@@ -2960,6 +3460,20 @@ public class TelegramService {
                         """);
 
                 return;
+            }
+
+            // =====================================
+            // USER HOURLY / DAILY LIMIT CHECK
+            // ADMIN and OWNER are intentionally unlimited.
+            // =====================================
+
+            if (isNormalUser(requestingUser)) {
+                EpisodeUsageService.EpisodeQuota quota = episodeUsageService.getQuota(requestingUser);
+
+                if (!quota.allowed()) {
+                    sendEpisodeLimitMessage(bot, chatId, quota, 0);
+                    return;
+                }
             }
 
             // =====================================
@@ -3041,6 +3555,24 @@ public class TelegramService {
                     continue;
                 }
 
+                if (isNormalUser(requestingUser)) {
+                    EpisodeUsageService.EpisodeQuota quota = episodeUsageService.getQuota(requestingUser);
+
+                    if (!quota.allowed()) {
+                        log.info(
+                                "Episode batch stopped by usage limit telegramId={} reason={} hourly={}/{} daily={}/{} sentCount={}",
+                                requestingUser.getTelegramId(),
+                                quota.reason(),
+                                quota.hourlyUsed(), EpisodeUsageService.MAX_EPISODES_PER_HOUR,
+                                quota.dailyUsed(), EpisodeUsageService.MAX_EPISODES_PER_DAY,
+                                sentCount
+                        );
+
+                        sendEpisodeLimitMessage(bot, chatId, quota, sentCount);
+                        return;
+                    }
+                }
+
                 SendAudio sendAudio = new SendAudio();
 
                 sendAudio.setChatId(String.valueOf(chatId));
@@ -3057,7 +3589,15 @@ public class TelegramService {
                 // ADMIN / OWNER are allowed to forward the audio.
                 sendAudio.setProtectContent(!canForwardEpisodes(requestingUser));
 
-                bot.execute(sendAudio);
+                Message sentAudioMessage = bot.execute(sendAudio);
+
+                if (isNormalUser(requestingUser)) {
+                    if (sentAudioMessage != null && sentAudioMessage.getMessageId() != null) {
+                        scheduleAutoDeleteBotMessage(bot, chatId, sentAudioMessage.getMessageId());
+                    }
+
+                    episodeUsageService.recordEpisodeDelivered(requestingUser);
+                }
 
                 sentCount++;
             }
@@ -3096,9 +3636,7 @@ public class TelegramService {
 
             completed.setReplyMarkup(keyboard);
 
-            completed.setProtectContent(!canForwardEpisodes(requestingUser));
-
-            bot.execute(completed);
+            executeSendMessage(bot, chatId, completed);
 
         } catch (Exception e) {
 
@@ -3130,31 +3668,122 @@ public class TelegramService {
 
         sendMessage.setText(text);
 
-        sendMessage.setProtectContent(true);
-
-        return bot.execute(sendMessage);
+        return executeSendMessage(bot, chatId, sendMessage);
     }
 
     // =========================================
-    // AUTO DELETE
+    // CONTENT PROTECTION + AUTO DELETE
+    //
+    // USER        -> protected + delete bot content after 24 hours
+    // ADMIN/OWNER -> unprotected + no auto delete
     // =========================================
 
-    private void autoDeleteMessages(TelegramLongPollingBot bot, Long chatId, Integer userMessageId, Integer botMessageId) {
+    private Message executeSendMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            SendMessage sendMessage
+    ) throws Exception {
+
+        TelegramUser recipient = telegramUserService.getUserByTelegramId(chatId);
+        boolean protectedContent = !canForwardEpisodes(recipient);
+
+        sendMessage.setProtectContent(protectedContent);
+
+        Message sentMessage = bot.execute(sendMessage);
+
+        if (protectedContent && sentMessage != null && sentMessage.getMessageId() != null) {
+            scheduleAutoDeleteBotMessage(bot, chatId, sentMessage.getMessageId());
+        }
+
+        return sentMessage;
+    }
+
+    // =========================================
+    // PRIVATE USER INPUT FILTER
+    //
+    // The Telegram client may still display its native attachment button.
+    // Bots cannot hide that UI in a private chat. This method enforces the
+    // actual server-side rule for normal USER accounts.
+    // =========================================
+
+    private void rejectNonTextUserMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Message message
+    ) {
+
+        Integer messageId = message != null ? message.getMessageId() : null;
+
+        log.info("Blocked non-text private input telegramId={} chatId={} messageId={}",
+                message != null && message.getFrom() != null ? message.getFrom().getId() : null,
+                chatId,
+                messageId);
+
+        if (messageId != null) {
+            try {
+                bot.execute(new DeleteMessage(String.valueOf(chatId), messageId));
+            } catch (Exception e) {
+                log.warn("Failed to delete blocked private input chatId={} messageId={} reason={}",
+                        chatId, messageId, e.getMessage());
+            }
+        }
+
+        try {
+            sendMessage(bot, chatId, """
+                    ✍️ Text messages only.
+
+                    Files, photos, audio, video, voice, stickers, polls,
+                    locations and contacts are not accepted here.
+                    """);
+        } catch (Exception e) {
+            log.warn("Failed to send text-only notice chatId={} reason={}", chatId, e.getMessage());
+        }
+    }
+
+    private void scheduleAutoDeleteBotMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Integer messageId
+    ) {
+
+        if (chatId == null || messageId == null) {
+            return;
+        }
 
         scheduler.schedule(() -> {
-
             try {
-
-                bot.execute(new DeleteMessage(String.valueOf(chatId), userMessageId));
-
-                bot.execute(new DeleteMessage(String.valueOf(chatId), botMessageId));
-
+                bot.execute(new DeleteMessage(String.valueOf(chatId), messageId));
             } catch (Exception e) {
-
-                log.error("Auto delete failed", e);
+                log.debug("Auto delete skipped/failed chatId={} messageId={} reason={}",
+                        chatId, messageId, e.getMessage());
             }
+        }, AUTO_DELETE_HOURS, TimeUnit.HOURS);
+    }
 
-        }, 48, TimeUnit.HOURS); // MAX 48 hours — Telegram limit
+    private void autoDeleteUserMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Integer userMessageId
+    ) {
+
+        // Bot responses are already scheduled by executeSendMessage().
+        // This helper only removes the triggering USER message in the
+        // subscription-required flow. ADMIN/OWNER messages are never
+        // auto-deleted.
+        TelegramUser user = telegramUserService.getUserByTelegramId(chatId);
+
+        if (canForwardEpisodes(user) || userMessageId == null) {
+            return;
+        }
+
+        scheduler.schedule(() -> {
+            try {
+                bot.execute(new DeleteMessage(String.valueOf(chatId), userMessageId));
+            } catch (Exception e) {
+                log.debug("Auto delete user message skipped/failed chatId={} messageId={} reason={}",
+                        chatId, userMessageId, e.getMessage());
+            }
+        }, AUTO_DELETE_HOURS, TimeUnit.HOURS);
     }
 
     private void syncStories(TelegramLongPollingBot bot, Long chatId) {
