@@ -338,8 +338,7 @@ public class EpisodeService {
             return List.of();
         }
 
-        return episodeRepository
-                .findTop50ByStoryAndEpisodeNoNumericBetweenOrderByEpisodeNoNumericAsc(story, start, end);
+        return episodeRepository.findTop50ByStoryAndEpisodeNoNumericBetweenOrderByEpisodeNoNumericAsc(story, start, end);
     }
 
     // =====================================

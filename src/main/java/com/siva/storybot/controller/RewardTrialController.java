@@ -22,49 +22,33 @@ public class RewardTrialController {
 
     /**
      * Simple health/status endpoint.
-     *
+     * <p>
      * This endpoint does NOT activate any reward.
-     *
+     * <p>
      * Example:
      * GET /reward/status
      */
-    @GetMapping(
-            value = "/status",
-            produces = MediaType.APPLICATION_JSON_VALUE
-    )
+    @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<RewardStatusResponse> status() {
 
-        String botUsername = sanitizeBotUsername(
-                telegramConfig.getBotUsername()
-        );
+        String botUsername = sanitizeBotUsername(telegramConfig.getBotUsername());
 
-        return ResponseEntity.ok(
-                new RewardStatusResponse(
-                        rewardTrialService.isEnabled(),
-                        botUsername,
-                        RewardTrialService.REWARD_ACCESS_MINUTES,
-                        RewardTrialService.REWARD_LINK_MINUTES,
-                        "DIRECT_TELEGRAM"
-                )
-        );
+        return ResponseEntity.ok(new RewardStatusResponse(rewardTrialService.isEnabled(), botUsername, RewardTrialService.REWARD_ACCESS_MINUTES, RewardTrialService.REWARD_LINK_MINUTES, "DIRECT_TELEGRAM"));
     }
 
     /**
      * Legacy endpoint.
-     *
+     * <p>
      * Old ShrtFly links may still point here.
      * They must NEVER activate a reward anymore.
-     *
+     * <p>
      * New flow:
-     *
+     * <p>
      * ShrtFly
-     *      ->
+     * ->
      * https://t.me/<BOT>?start=rw_<TOKEN>
      */
-    @GetMapping(
-            value = "/landing",
-            produces = MediaType.TEXT_HTML_VALUE
-    )
+    @GetMapping(value = "/landing", produces = MediaType.TEXT_HTML_VALUE)
     public ResponseEntity<String> oldLanding() {
 
         return legacyResponse();
@@ -72,16 +56,13 @@ public class RewardTrialController {
 
     /**
      * Legacy POST endpoint.
-     *
+     * <p>
      * Kept only so old browser pages do not produce an ugly
      * 404/405 response.
-     *
+     * <p>
      * This endpoint NEVER activates a reward.
      */
-    @PostMapping(
-            value = "/complete",
-            produces = MediaType.TEXT_HTML_VALUE
-    )
+    @PostMapping(value = "/complete", produces = MediaType.TEXT_HTML_VALUE)
     public ResponseEntity<String> oldComplete() {
 
         return legacyResponse();
@@ -89,13 +70,9 @@ public class RewardTrialController {
 
     private ResponseEntity<String> legacyResponse() {
 
-        String botUsername = sanitizeBotUsername(
-                telegramConfig.getBotUsername()
-        );
+        String botUsername = sanitizeBotUsername(telegramConfig.getBotUsername());
 
-        String telegramUrl = botUsername.isBlank()
-                ? "https://t.me/"
-                : "https://t.me/" + botUsername + "?start=reward_retry";
+        String telegramUrl = botUsername.isBlank() ? "https://t.me/" : "https://t.me/" + botUsername + "?start=reward_retry";
 
         String html = """
                 <!doctype html>
@@ -104,12 +81,12 @@ public class RewardTrialController {
                     <meta charset="utf-8">
                     <meta name="viewport"
                           content="width=device-width, initial-scale=1">
-
+                
                     <meta name="robots"
                           content="noindex,nofollow,noarchive">
-
+                
                     <title>Reward Link Updated</title>
-
+                
                     <style>
                         body {
                             font-family: Arial, sans-serif;
@@ -118,7 +95,7 @@ public class RewardTrialController {
                             padding: 24px;
                             color: #1f2937;
                         }
-
+                
                         .card {
                             max-width: 520px;
                             margin: 10vh auto;
@@ -128,15 +105,15 @@ public class RewardTrialController {
                             text-align: center;
                             box-shadow: 0 12px 35px rgba(0,0,0,.08);
                         }
-
+                
                         h2 {
                             color: #b45309;
                         }
-
+                
                         p {
                             line-height: 1.6;
                         }
-
+                
                         a {
                             display: inline-block;
                             margin-top: 18px;
@@ -149,45 +126,34 @@ public class RewardTrialController {
                         }
                     </style>
                 </head>
-
+                
                 <body>
-
+                
                     <div class="card">
-
+                
                         <h2>Old Reward Link</h2>
-
+                
                         <p>
                             This reward link belongs to the previous
                             reward system.
                         </p>
-
+                
                         <p>
                             Please return to Telegram and request a
                             new 1-hour reward link.
                         </p>
-
+                
                         <a href="%s">
                             Return to Telegram
                         </a>
-
+                
                     </div>
-
+                
                 </body>
                 </html>
-                """.formatted(
-                escapeHtmlAttribute(telegramUrl)
-        );
+                """.formatted(escapeHtmlAttribute(telegramUrl));
 
-        return ResponseEntity
-                .status(HttpStatus.GONE)
-                .cacheControl(CacheControl.noStore())
-                .header("Pragma", "no-cache")
-                .header(
-                        "X-Robots-Tag",
-                        "noindex, nofollow, noarchive"
-                )
-                .contentType(MediaType.TEXT_HTML)
-                .body(html);
+        return ResponseEntity.status(HttpStatus.GONE).cacheControl(CacheControl.noStore()).header("Pragma", "no-cache").header("X-Robots-Tag", "noindex, nofollow, noarchive").contentType(MediaType.TEXT_HTML).body(html);
     }
 
     private String sanitizeBotUsername(String value) {
@@ -196,9 +162,7 @@ public class RewardTrialController {
             return "";
         }
 
-        return value
-                .replace("@", "")
-                .trim();
+        return value.replace("@", "").trim();
     }
 
     private String escapeHtmlAttribute(String value) {
@@ -207,20 +171,10 @@ public class RewardTrialController {
             return "";
         }
 
-        return value
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&#39;");
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
     }
 
-    public record RewardStatusResponse(
-            boolean enabled,
-            String botUsername,
-            int rewardMinutes,
-            int linkExpiryMinutes,
-            String mode
-    ) {
+    public record RewardStatusResponse(boolean enabled, String botUsername, int rewardMinutes, int linkExpiryMinutes,
+                                       String mode) {
     }
 }

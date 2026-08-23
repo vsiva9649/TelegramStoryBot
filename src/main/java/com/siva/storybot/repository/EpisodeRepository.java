@@ -16,10 +16,6 @@ public interface EpisodeRepository extends JpaRepository<Episode, Long> {
 
     List<Episode> findByStory(Story story);
 
-    List<Episode> findTop50ByStoryAndEpisodeNoNumericBetweenOrderByEpisodeNoNumericAsc(
-            Story story,
-            Integer start,
-            Integer end
-    );
+    List<Episode> findTop50ByStoryAndEpisodeNoNumericBetweenOrderByEpisodeNoNumericAsc(Story story, Integer start, Integer end);
 
 }

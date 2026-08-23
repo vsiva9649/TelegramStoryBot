@@ -63,7 +63,7 @@ public class GroqService {
 
             String systemPrompt = """
                     You are an owner/admin command intent classifier for a Telegram story bot.
-
+                    
                     Return ONLY one of these exact intent names:
                     GET_USERS
                     GET_ACTIVE_USERS
@@ -74,7 +74,7 @@ public class GroqService {
                     GLOBAL_TRIAL_ON
                     GLOBAL_TRIAL_OFF
                     UNKNOWN
-
+                    
                     Examples:
                     show users -> GET_USERS
                     list all users -> GET_USERS
@@ -92,51 +92,20 @@ public class GroqService {
                     expire subscription -> UPDATE_USER
                     enable global trial -> GLOBAL_TRIAL_ON
                     disable global trial -> GLOBAL_TRIAL_OFF
-
+                    
                     Never output SQL, code, explanations, punctuation, or extra text.
                     """;
 
-            GroqRequest request = GroqRequest.builder()
-                    .model(model)
-                    .messages(List.of(
-                            GroqRequest.Message.builder()
-                                    .role("system")
-                                    .content(systemPrompt)
-                                    .build(),
-                            GroqRequest.Message.builder()
-                                    .role("user")
-                                    .content(userMessage)
-                                    .build()
-                    ))
-                    .build();
+            GroqRequest request = GroqRequest.builder().model(model).messages(List.of(GroqRequest.Message.builder().role("system").content(systemPrompt).build(), GroqRequest.Message.builder().role("user").content(userMessage).build())).build();
 
-            GroqResponse response = webClientBuilder.build()
-                    .post()
-                    .uri(groqUrl)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(request)
-                    .retrieve()
-                    .bodyToMono(GroqResponse.class)
-                    .timeout(Duration.ofSeconds(5))
-                    .block();
+            GroqResponse response = webClientBuilder.build().post().uri(groqUrl).header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey).contentType(MediaType.APPLICATION_JSON).bodyValue(request).retrieve().bodyToMono(GroqResponse.class).timeout(Duration.ofSeconds(5)).block();
 
-            if (response == null
-                    || response.getChoices() == null
-                    || response.getChoices().isEmpty()
-                    || response.getChoices().get(0).getMessage() == null
-                    || response.getChoices().get(0).getMessage().getContent() == null) {
+            if (response == null || response.getChoices() == null || response.getChoices().isEmpty() || response.getChoices().get(0).getMessage() == null || response.getChoices().get(0).getMessage().getContent() == null) {
 
                 return OwnerIntent.UNKNOWN;
             }
 
-            String aiReply = response.getChoices()
-                    .get(0)
-                    .getMessage()
-                    .getContent()
-                    .trim()
-                    .toUpperCase(Locale.ROOT)
-                    .replaceAll("[^A-Z_]", "");
+            String aiReply = response.getChoices().get(0).getMessage().getContent().trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z_]", "");
 
             log.info("Groq AI detected owner intent={}", aiReply);
 
@@ -148,20 +117,13 @@ public class GroqService {
 
         } catch (WebClientResponseException e) {
 
-            log.warn(
-                    "Groq owner intent fallback failed status={} message={}",
-                    e.getStatusCode().value(),
-                    e.getStatusText()
-            );
+            log.warn("Groq owner intent fallback failed status={} message={}", e.getStatusCode().value(), e.getStatusText());
 
             return OwnerIntent.UNKNOWN;
 
         } catch (Exception e) {
 
-            log.warn(
-                    "Groq owner intent fallback failed reason={}",
-                    e.getMessage()
-            );
+            log.warn("Groq owner intent fallback failed reason={}", e.getMessage());
 
             return OwnerIntent.UNKNOWN;
         }
@@ -176,10 +138,7 @@ public class GroqService {
             return OwnerIntent.UNKNOWN;
         }
 
-        String normalized = userMessage
-                .trim()
-                .toLowerCase(Locale.ROOT)
-                .replaceAll("\\s+", " ");
+        String normalized = userMessage.trim().toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
 
         String firstToken = normalized.split(" ", 2)[0];
 
@@ -204,28 +163,19 @@ public class GroqService {
 
     private OwnerIntent detectLocalNaturalLanguageIntent(String normalized) {
 
-        if (normalized.matches(".*\\b(active|subscribed|subscription active)\\b.*\\busers?\\b.*")
-                || normalized.matches(".*\\busers?\\b.*\\b(active|subscribed)\\b.*")) {
+        if (normalized.matches(".*\\b(active|subscribed|subscription active)\\b.*\\busers?\\b.*") || normalized.matches(".*\\busers?\\b.*\\b(active|subscribed)\\b.*")) {
             return OwnerIntent.GET_ACTIVE_USERS;
         }
 
-        if (normalized.matches(".*\\b(expired|inactive|no access)\\b.*\\busers?\\b.*")
-                || normalized.matches(".*\\busers?\\b.*\\b(expired|inactive)\\b.*")) {
+        if (normalized.matches(".*\\b(expired|inactive|no access)\\b.*\\busers?\\b.*") || normalized.matches(".*\\busers?\\b.*\\b(expired|inactive)\\b.*")) {
             return OwnerIntent.GET_EXPIRED_USERS;
         }
 
-        if (normalized.equals("users")
-                || normalized.contains("show users")
-                || normalized.contains("list users")
-                || normalized.contains("all users")
-                || normalized.contains("get users")) {
+        if (normalized.equals("users") || normalized.contains("show users") || normalized.contains("list users") || normalized.contains("all users") || normalized.contains("get users")) {
             return OwnerIntent.GET_USERS;
         }
 
-        if (normalized.contains("user details")
-                || normalized.startsWith("show user ")
-                || normalized.startsWith("get user ")
-                || normalized.matches("^user\\s+.+")) {
+        if (normalized.contains("user details") || normalized.startsWith("show user ") || normalized.startsWith("get user ") || normalized.matches("^user\\s+.+")) {
             return OwnerIntent.GET_USER_DETAILS;
         }
 
@@ -233,28 +183,18 @@ public class GroqService {
             return OwnerIntent.GET_HISTORY;
         }
 
-        if (normalized.contains("global")
-                && (normalized.contains("trial") || normalized.contains("trail"))) {
+        if (normalized.contains("global") && (normalized.contains("trial") || normalized.contains("trail"))) {
 
-            if (normalized.contains("off")
-                    || normalized.contains("disable")
-                    || normalized.contains("stop")) {
+            if (normalized.contains("off") || normalized.contains("disable") || normalized.contains("stop")) {
                 return OwnerIntent.GLOBAL_TRIAL_OFF;
             }
 
-            if (normalized.contains("on")
-                    || normalized.contains("enable")
-                    || normalized.contains("start")) {
+            if (normalized.contains("on") || normalized.contains("enable") || normalized.contains("start")) {
                 return OwnerIntent.GLOBAL_TRIAL_ON;
             }
         }
 
-        if (normalized.contains("make admin")
-                || normalized.contains("activate")
-                || normalized.contains("expire")
-                || normalized.startsWith("trial ")
-                || normalized.startsWith("trail ")
-                || normalized.contains("subscription")) {
+        if (normalized.contains("make admin") || normalized.contains("activate") || normalized.contains("expire") || normalized.startsWith("trial ") || normalized.startsWith("trail ") || normalized.contains("subscription")) {
             return OwnerIntent.UPDATE_USER;
         }
 

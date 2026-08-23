@@ -23,23 +23,11 @@ public interface RewardTrialRepository extends JpaRepository<RewardTrial, Long> 
     @Query("select r from RewardTrial r where r.token = :token")
     Optional<RewardTrial> findByTokenForUpdate(@Param("token") String token);
 
-    List<RewardTrial> findAllByTelegramUserAndStatusOrderByCreatedAtDesc(
-            TelegramUser telegramUser,
-            RewardTrialStatus status
-    );
+    List<RewardTrial> findAllByTelegramUserAndStatusOrderByCreatedAtDesc(TelegramUser telegramUser, RewardTrialStatus status);
 
-    Optional<RewardTrial> findTopByTelegramUserAndStatusOrderByCreatedAtDesc(
-            TelegramUser telegramUser,
-            RewardTrialStatus status
-    );
+    Optional<RewardTrial> findTopByTelegramUserAndStatusOrderByCreatedAtDesc(TelegramUser telegramUser, RewardTrialStatus status);
 
-    List<RewardTrial> findByStatusAndExpiresAtLessThanEqual(
-            RewardTrialStatus status,
-            LocalDateTime expiresAt
-    );
+    List<RewardTrial> findByStatusAndExpiresAtLessThanEqual(RewardTrialStatus status, LocalDateTime expiresAt);
 
-    List<RewardTrial> findByStatusAndLinkExpiresAtLessThanEqual(
-            RewardTrialStatus status,
-            LocalDateTime linkExpiresAt
-    );
+    List<RewardTrial> findByStatusAndLinkExpiresAtLessThanEqual(RewardTrialStatus status, LocalDateTime linkExpiresAt);
 }

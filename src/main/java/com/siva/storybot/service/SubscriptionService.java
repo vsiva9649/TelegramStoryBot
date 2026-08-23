@@ -57,8 +57,7 @@ public class SubscriptionService {
 
             if (telegramUser.getRole() == UserRole.OWNER || telegramUser.getRole() == UserRole.ADMIN) {
 
-                log.debug("Access granted telegramId={} source=ROLE_BYPASS role={}",
-                        telegramUser.getTelegramId(), telegramUser.getRole());
+                log.debug("Access granted telegramId={} source=ROLE_BYPASS role={}", telegramUser.getTelegramId(), telegramUser.getRole());
 
                 return true;
             }
@@ -69,8 +68,7 @@ public class SubscriptionService {
 
             if (hasActiveSubscription(telegramUser)) {
 
-                log.debug("Access granted telegramId={} source=SUBSCRIPTION",
-                        telegramUser.getTelegramId());
+                log.debug("Access granted telegramId={} source=SUBSCRIPTION", telegramUser.getTelegramId());
 
                 return true;
             }
@@ -81,8 +79,7 @@ public class SubscriptionService {
 
             if (rewardTrialService.hasActiveRewardTrial(telegramUser)) {
 
-                log.debug("Access granted telegramId={} source=REWARD_TRIAL",
-                        telegramUser.getTelegramId());
+                log.debug("Access granted telegramId={} source=REWARD_TRIAL", telegramUser.getTelegramId());
 
                 return true;
             }
@@ -93,10 +90,7 @@ public class SubscriptionService {
 
             boolean globalTrialAccess = globalTrialService.hasGlobalTrialAccess(telegramUser);
 
-            log.debug("Access check telegramId={} source={} active={}",
-                    telegramUser.getTelegramId(),
-                    globalTrialAccess ? "GLOBAL_TRIAL" : "DENIED",
-                    globalTrialAccess);
+            log.debug("Access check telegramId={} source={} active={}", telegramUser.getTelegramId(), globalTrialAccess ? "GLOBAL_TRIAL" : "DENIED", globalTrialAccess);
 
             return globalTrialAccess;
 
@@ -127,11 +121,7 @@ public class SubscriptionService {
                 return false;
             }
 
-            List<Subscription> activeSubscriptions =
-                    subscriptionRepository.findAllByTelegramUserAndStatusOrderByExpiryDateDesc(
-                            telegramUser,
-                            SubscriptionStatus.ACTIVE
-                    );
+            List<Subscription> activeSubscriptions = subscriptionRepository.findAllByTelegramUserAndStatusOrderByExpiryDateDesc(telegramUser, SubscriptionStatus.ACTIVE);
 
             if (activeSubscriptions.isEmpty()) {
                 return false;
@@ -147,15 +137,13 @@ public class SubscriptionService {
                 }
 
                 // Null or past expiry is never allowed to remain ACTIVE.
-                if (subscription.getExpiryDate() == null
-                        || today.isAfter(subscription.getExpiryDate())) {
+                if (subscription.getExpiryDate() == null || today.isAfter(subscription.getExpiryDate())) {
 
                     expireSubscriptionRecord(subscription);
                     continue;
                 }
 
-                boolean isTrial = Boolean.TRUE.equals(subscription.getTrial())
-                        || subscription.getPlan() == SubscriptionPlan.FREE;
+                boolean isTrial = Boolean.TRUE.equals(subscription.getTrial()) || subscription.getPlan() == SubscriptionPlan.FREE;
 
                 // FREE/manual trials do not require payment.
                 // Paid subscriptions require paymentDone=true.
@@ -164,22 +152,14 @@ public class SubscriptionService {
                     continue;
                 }
 
-                log.warn(
-                        "Paid subscription payment incomplete telegramId={} subscriptionId={}",
-                        telegramUser.getTelegramId(),
-                        subscription.getId()
-                );
+                log.warn("Paid subscription payment incomplete telegramId={} subscriptionId={}", telegramUser.getTelegramId(), subscription.getId());
             }
 
             return accessGranted;
 
         } catch (Exception e) {
 
-            log.error(
-                    "Subscription validation failed telegramId={}",
-                    telegramUser != null ? telegramUser.getTelegramId() : null,
-                    e
-            );
+            log.error("Subscription validation failed telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
 
             return false;
         }
@@ -318,11 +298,7 @@ public class SubscriptionService {
                 return;
             }
 
-            List<Subscription> activeSubscriptions =
-                    subscriptionRepository.findAllByTelegramUserAndStatusOrderByExpiryDateDesc(
-                            telegramUser,
-                            SubscriptionStatus.ACTIVE
-                    );
+            List<Subscription> activeSubscriptions = subscriptionRepository.findAllByTelegramUserAndStatusOrderByExpiryDateDesc(telegramUser, SubscriptionStatus.ACTIVE);
 
             if (activeSubscriptions.isEmpty()) {
 
@@ -332,19 +308,11 @@ public class SubscriptionService {
 
             activeSubscriptions.forEach(this::expireSubscriptionRecord);
 
-            log.info(
-                    "All active subscriptions manually expired telegramId={} count={}",
-                    telegramUser.getTelegramId(),
-                    activeSubscriptions.size()
-            );
+            log.info("All active subscriptions manually expired telegramId={} count={}", telegramUser.getTelegramId(), activeSubscriptions.size());
 
         } catch (Exception e) {
 
-            log.error(
-                    "Manual subscription expiry failed telegramId={}",
-                    telegramUser != null ? telegramUser.getTelegramId() : null,
-                    e
-            );
+            log.error("Manual subscription expiry failed telegramId={}", telegramUser != null ? telegramUser.getTelegramId() : null, e);
 
             throw e;
         }
@@ -363,11 +331,7 @@ public class SubscriptionService {
             return;
         }
 
-        List<Subscription> activeSubscriptions =
-                subscriptionRepository.findAllByTelegramUserAndStatusOrderByExpiryDateDesc(
-                        telegramUser,
-                        SubscriptionStatus.ACTIVE
-                );
+        List<Subscription> activeSubscriptions = subscriptionRepository.findAllByTelegramUserAndStatusOrderByExpiryDateDesc(telegramUser, SubscriptionStatus.ACTIVE);
 
         activeSubscriptions.forEach(this::expireSubscriptionRecord);
     }

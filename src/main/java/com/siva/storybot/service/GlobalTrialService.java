@@ -49,12 +49,9 @@ public class GlobalTrialService {
         // Prefer an existing row for the exact same campaign end date.
         // This makes same-date reactivation idempotent even if another
         // campaign configuration was created in between.
-        Optional<GlobalTrial> sameCampaignOptional =
-                globalTrialRepository.findTopByEndDateOrderByIdDesc(endDate);
+        Optional<GlobalTrial> sameCampaignOptional = globalTrialRepository.findTopByEndDateOrderByIdDesc(endDate);
 
-        Optional<GlobalTrial> targetOptional = sameCampaignOptional.isPresent()
-                ? sameCampaignOptional
-                : globalTrialRepository.findTopByOrderByIdDesc();
+        Optional<GlobalTrial> targetOptional = sameCampaignOptional.isPresent() ? sameCampaignOptional : globalTrialRepository.findTopByOrderByIdDesc();
 
         if (targetOptional.isPresent()) {
 
@@ -64,20 +61,15 @@ public class GlobalTrialService {
             // Do not reset a healthy startDate and do not insert another row.
             // If legacy data is malformed, repair this row instead of
             // returning an "enabled" campaign that grants no access.
-            boolean sameActiveCampaign = Boolean.TRUE.equals(latest.getEnabled())
-                    && Objects.equals(latest.getEndDate(), endDate);
+            boolean sameActiveCampaign = Boolean.TRUE.equals(latest.getEnabled()) && Objects.equals(latest.getEndDate(), endDate);
 
-            boolean healthySameCampaign = sameActiveCampaign
-                    && latest.getStartDate() != null
-                    && latest.getTrialDays() != null
-                    && latest.getTrialDays() > 0;
+            boolean healthySameCampaign = sameActiveCampaign && latest.getStartDate() != null && latest.getTrialDays() != null && latest.getTrialDays() > 0;
 
             if (healthySameCampaign) {
 
                 disableOtherActiveTrials(latest.getId());
 
-                log.info("Global trial already enabled; returning existing config id={} startDate={} endDate={}",
-                        latest.getId(), latest.getStartDate(), latest.getEndDate());
+                log.info("Global trial already enabled; returning existing config id={} startDate={} endDate={}", latest.getId(), latest.getStartDate(), latest.getEndDate());
 
                 return latest;
             }
@@ -118,13 +110,7 @@ public class GlobalTrialService {
         }
 
         // First ever global trial configuration.
-        GlobalTrial trial = GlobalTrial.builder()
-                .enabled(true)
-                .trialDays(DEFAULT_TRIAL_DAYS)
-                .startDate(now)
-                .endDate(endDate)
-                .enabledBy(enabledBy)
-                .build();
+        GlobalTrial trial = GlobalTrial.builder().enabled(true).trialDays(DEFAULT_TRIAL_DAYS).startDate(now).endDate(endDate).enabledBy(enabledBy).build();
 
         GlobalTrial saved = globalTrialRepository.save(trial);
 
@@ -172,8 +158,7 @@ public class GlobalTrialService {
     @Transactional
     public Optional<GlobalTrial> getActiveGlobalTrial() {
 
-        List<GlobalTrial> activeTrials =
-                globalTrialRepository.findAllByEnabledTrueOrderByIdDesc();
+        List<GlobalTrial> activeTrials = globalTrialRepository.findAllByEnabledTrueOrderByIdDesc();
 
         if (activeTrials.isEmpty()) {
             return Optional.empty();
@@ -187,22 +172,13 @@ public class GlobalTrialService {
         // Disable malformed, expired and duplicate ACTIVE rows.
         for (GlobalTrial trial : activeTrials) {
 
-            boolean invalid = trial.getStartDate() == null
-                    || trial.getEndDate() == null
-                    || trial.getTrialDays() == null
-                    || trial.getTrialDays() <= 0;
+            boolean invalid = trial.getStartDate() == null || trial.getEndDate() == null || trial.getTrialDays() == null || trial.getTrialDays() <= 0;
 
             if (invalid) {
                 trial.setEnabled(false);
                 rowsToDisable.add(trial);
 
-                log.warn(
-                        "Invalid global trial disabled id={} startDate={} endDate={} trialDays={}",
-                        trial.getId(),
-                        trial.getStartDate(),
-                        trial.getEndDate(),
-                        trial.getTrialDays()
-                );
+                log.warn("Invalid global trial disabled id={} startDate={} endDate={} trialDays={}", trial.getId(), trial.getStartDate(), trial.getEndDate(), trial.getTrialDays());
 
                 continue;
             }
@@ -211,11 +187,7 @@ public class GlobalTrialService {
                 trial.setEnabled(false);
                 rowsToDisable.add(trial);
 
-                log.info(
-                        "Global trial auto-expired id={} endDate={}",
-                        trial.getId(),
-                        trial.getEndDate()
-                );
+                log.info("Global trial auto-expired id={} endDate={}", trial.getId(), trial.getEndDate());
 
                 continue;
             }
@@ -235,12 +207,7 @@ public class GlobalTrialService {
         }
 
         if (selected != null && activeTrials.size() > 1) {
-            log.warn(
-                    "Global trial active-row cleanup completed totalActiveRows={} disabledRows={} keepingId={}",
-                    activeTrials.size(),
-                    rowsToDisable.size(),
-                    selected.getId()
-            );
+            log.warn("Global trial active-row cleanup completed totalActiveRows={} disabledRows={} keepingId={}", activeTrials.size(), rowsToDisable.size(), selected.getId());
         }
 
         return Optional.ofNullable(selected);
@@ -295,9 +262,7 @@ public class GlobalTrialService {
         // USER CANNOT CROSS GLOBAL END DATE
         // =====================================
 
-        LocalDateTime effectiveExpiry = normalExpiry.isBefore(globalEnd)
-                ? normalExpiry
-                : globalEnd;
+        LocalDateTime effectiveExpiry = normalExpiry.isBefore(globalEnd) ? normalExpiry : globalEnd;
 
         LocalDateTime now = LocalDateTime.now();
 
@@ -345,9 +310,7 @@ public class GlobalTrialService {
 
         LocalDateTime normalExpiry = trialStart.plusDays(trial.getTrialDays());
 
-        LocalDateTime effectiveExpiry = normalExpiry.isBefore(trial.getEndDate())
-                ? normalExpiry
-                : trial.getEndDate();
+        LocalDateTime effectiveExpiry = normalExpiry.isBefore(trial.getEndDate()) ? normalExpiry : trial.getEndDate();
 
         return Optional.of(effectiveExpiry);
     }
@@ -380,9 +343,7 @@ public class GlobalTrialService {
 
         List<GlobalTrial> activeTrials = globalTrialRepository.findAllByEnabledTrueOrderByIdDesc();
 
-        List<GlobalTrial> duplicates = activeTrials.stream()
-                .filter(trial -> !Objects.equals(trial.getId(), keepId))
-                .toList();
+        List<GlobalTrial> duplicates = activeTrials.stream().filter(trial -> !Objects.equals(trial.getId(), keepId)).toList();
 
         if (duplicates.isEmpty()) {
             return;
@@ -391,7 +352,6 @@ public class GlobalTrialService {
         duplicates.forEach(trial -> trial.setEnabled(false));
         globalTrialRepository.saveAll(duplicates);
 
-        log.warn("Disabled {} duplicate active global trial row(s); keeping id={}",
-                duplicates.size(), keepId);
+        log.warn("Disabled {} duplicate active global trial row(s); keeping id={}", duplicates.size(), keepId);
     }
 }

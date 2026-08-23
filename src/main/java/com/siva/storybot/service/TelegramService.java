@@ -6,10 +6,7 @@ import com.siva.storybot.entity.Episode;
 import com.siva.storybot.entity.Story;
 import com.siva.storybot.entity.Subscription;
 import com.siva.storybot.entity.TelegramUser;
-import com.siva.storybot.enums.BillingType;
-import com.siva.storybot.enums.OwnerIntent;
-import com.siva.storybot.enums.SubscriptionPlan;
-import com.siva.storybot.enums.UserRole;
+import com.siva.storybot.enums.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -48,33 +45,22 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class TelegramService {
 
+    private static final int AUTO_DELETE_HOURS = 24;
     private final TelegramConfig telegramConfig;
-
     private final TelegramUserService telegramUserService;
-
     private final SubscriptionService subscriptionService;
-
     private final GlobalTrialService globalTrialService;
-
     private final GroqService groqService;
-
     private final StoryService storyService;
-
     private final EpisodeService episodeService;
-
     private final EpisodeUsageService episodeUsageService;
-
     private final RewardTrialService rewardTrialService;
     private final Map<Long, Long> searchStoryContext = new ConcurrentHashMap<>();
     private final Set<Long> activeEpisodeBatches = ConcurrentHashMap.newKeySet();
 
-    private static final int MAX_EPISODES_PER_SEARCH = 50;
-    private static final int AUTO_DELETE_HOURS = 24;
-
     // =========================================
     // SCHEDULER
     // =========================================
-
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(5);
 
     private ChatFullInfo loadChatFullDetails(TelegramLongPollingBot bot, Long chatId) {
@@ -362,8 +348,7 @@ public class TelegramService {
                 if (isNormalUser(telegramUser)) {
                     rejectNonTextUserMessage(bot, chatId, message);
                 } else {
-                    log.info("Ignoring non-text private message from privileged user telegramId={} role={}",
-                            telegramUser.getTelegramId(), telegramUser.getRole());
+                    log.info("Ignoring non-text private message from privileged user telegramId={} role={}", telegramUser.getTelegramId(), telegramUser.getRole());
                 }
 
                 return;
@@ -379,22 +364,20 @@ public class TelegramService {
             // the reward link.
             // =====================================
 
-            if (text.equalsIgnoreCase("🎁 Get 1 Hour Free")
-                    || text.equalsIgnoreCase("/reward")
-                    || text.equalsIgnoreCase("/freehour")) {
+            if (text.equalsIgnoreCase("🎁 Get 1 Hour Free") || text.equalsIgnoreCase("/reward") || text.equalsIgnoreCase("/freehour")) {
 
                 handleRewardTrialRequest(bot, chatId, telegramUser);
                 return;
             }
 
             // =====================================
-            // SHRTFLY -> DIRECT TELEGRAM DEEP LINK
+            // SHORT-LINK PROVIDER -> DIRECT TELEGRAM DEEP LINK
             //
-            // ShrtFly's final destination is now:
+            // The provider final destination is:
             // https://t.me/<bot>?start=rw_<ONE_TIME_TOKEN>
             //
             // This handler runs BEFORE the normal access gate so an expired
-            // USER can return from ShrtFly and claim the reward. The token is
+            // USER can return from the short-link provider and claim the reward. The token is
             // DB-locked, one-time, time-limited, and bound to the Telegram
             // account that originally requested it.
             // =====================================
@@ -482,7 +465,7 @@ public class TelegramService {
                 searchStoryContext.remove(chatId);
                 sendMessage(bot, chatId, """
                         🎬 Hindi Stories
-
+                        
                         🚧 Coming Soon
                         """);
                 return;
@@ -608,36 +591,23 @@ public class TelegramService {
 
             String trialInfo = "";
 
-            DateTimeFormatter displayFormatter =
-                    DateTimeFormatter.ofPattern("dd-MM-yyyy • hh:mm a");
+            DateTimeFormatter displayFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy • hh:mm a");
 
             if (user != null && rewardTrialService.hasActiveRewardTrial(user)) {
 
-                trialInfo = rewardTrialService
-                        .getRewardExpiry(user)
-                        .map(expiry -> """
+                trialInfo = rewardTrialService.getRewardExpiry(user).map(expiry -> """
+                        
+                        🎁 1 Hour Reward Access Active
+                        ⏳ Valid Until: %s
+                        """.formatted(expiry.format(displayFormatter))).orElse("");
 
-                    🎁 1 Hour Reward Access Active
-                    ⏳ Valid Until: %s
-                    """.formatted(
-                                expiry.format(displayFormatter)
-                        ))
-                        .orElse("");
+            } else if (user != null && !subscriptionService.hasActiveSubscription(user) && globalTrialService.hasGlobalTrialAccess(user)) {
 
-            } else if (user != null
-                    && !subscriptionService.hasActiveSubscription(user)
-                    && globalTrialService.hasGlobalTrialAccess(user)) {
-
-                trialInfo = globalTrialService
-                        .getUserTrialExpiry(user)
-                        .map(expiry -> """
-
-                    🎁 Free Trial Active
-                    ⏳ Valid Until: %s
-                    """.formatted(
-                                expiry.format(displayFormatter)
-                        ))
-                        .orElse("");
+                trialInfo = globalTrialService.getUserTrialExpiry(user).map(expiry -> """
+                        
+                        🎁 Free Trial Active
+                        ⏳ Valid Until: %s
+                        """.formatted(expiry.format(displayFormatter))).orElse("");
             }
 
             SendMessage sendMessage = new SendMessage();
@@ -673,12 +643,7 @@ public class TelegramService {
 
             rows.add(row1);
 
-            if (user != null
-                    && isNormalUser(user)
-                    && rewardTrialService.isEnabled()
-                    && !rewardTrialService.hasActiveRewardTrial(user)
-                    && !subscriptionService.hasActiveSubscription(user)
-                    && !globalTrialService.hasGlobalTrialAccess(user)) {
+            if (isNormalUser(user) && rewardTrialService.isEnabled() && !rewardTrialService.hasActiveRewardTrial(user) && !subscriptionService.hasActiveSubscription(user) && !globalTrialService.hasGlobalTrialAccess(user)) {
 
                 KeyboardRow rewardRow = new KeyboardRow();
                 rewardRow.add("🎁 Get 1 Hour Free");
@@ -1220,14 +1185,13 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ℹ️ Episode list buttons are no longer used.
-
+                        
                         Please select a story and enter a custom range
                         such as 1-50.
                         """);
 
                 showTamilMenu(bot, chatId);
 
-                return;
             }
 
         } catch (Exception e) {
@@ -1240,11 +1204,7 @@ public class TelegramService {
     // REWARDED 1-HOUR FREE ACCESS
     // =========================================
 
-    private void handleRewardTrialRequest(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            TelegramUser user
-    ) {
+    private void handleRewardTrialRequest(TelegramLongPollingBot bot, Long chatId, TelegramUser user) {
 
         try {
             searchStoryContext.remove(chatId);
@@ -1265,22 +1225,19 @@ public class TelegramService {
             if (!rewardTrialService.isEnabled()) {
                 sendMessage(bot, chatId, """
                         🚧 1 Hour Free Access is currently unavailable.
-
+                        
                         Please contact the admin for access.
                         """);
                 return;
             }
 
             if (rewardTrialService.hasActiveRewardTrial(user)) {
-                String expiry = rewardTrialService.getRewardExpiry(user)
-                        .map(Object::toString)
-                        .orElse("soon");
+                String expiry = rewardTrialService.getRewardExpiry(user).map(value -> value.format(DateTimeFormatter.ofPattern("dd-MM-yyyy • hh:mm a"))).orElse("soon");
 
                 sendMessage(bot, chatId, """
                         ✅ Your 1 Hour Free Access is already active.
-
-                        ⏳ Valid Until:
-                        %s
+                        
+                        ⏳ Valid Until: %s
                         """.formatted(expiry));
                 return;
             }
@@ -1288,19 +1245,17 @@ public class TelegramService {
             // A paid/manual/global access period should not be extended by
             // claiming a reward in parallel. Reward can be requested after
             // the current access source ends.
-            if (subscriptionService.hasActiveSubscription(user)
-                    || globalTrialService.hasGlobalTrialAccess(user)) {
+            if (subscriptionService.hasActiveSubscription(user) || globalTrialService.hasGlobalTrialAccess(user)) {
 
                 sendMessage(bot, chatId, """
                         ✅ You already have active access.
-
+                        
                         The 1-hour reward can be requested after your current access expires.
                         """);
                 return;
             }
 
-            RewardTrialService.RewardLinkResult result =
-                    rewardTrialService.createOrReuseRewardLink(user);
+            RewardTrialService.RewardLinkResult result = rewardTrialService.createOrReuseRewardLink(user);
 
             InlineKeyboardButton openAds = new InlineKeyboardButton();
             openAds.setText("▶️ Complete Ads & Unlock 1 Hour");
@@ -1313,13 +1268,13 @@ public class TelegramService {
             message.setChatId(String.valueOf(chatId));
             message.setText("""
                     🎁 Get 1 Hour Free Access
-
+                    
                     1. Tap the button below.
-                    2. Complete all required ShrtFly ad steps.
+                    2. Complete all required ad-link steps.
                     3. After the final step, Telegram will open this bot.
                     4. If Telegram shows a Start button, tap Start.
                     5. The same Telegram account will receive exactly 60 minutes of access.
-
+                    
                     🔐 This reward link is one-time and expires in %d minutes.
                     🔒 Forwarding the link to another account will not activate it.
                     """.formatted(RewardTrialService.REWARD_LINK_MINUTES));
@@ -1328,13 +1283,12 @@ public class TelegramService {
             executeSendMessage(bot, chatId, message);
 
         } catch (Exception e) {
-            log.error("handleRewardTrialRequest failed telegramId={}",
-                    user != null ? user.getTelegramId() : null, e);
+            log.error("handleRewardTrialRequest failed telegramId={}", user != null ? user.getTelegramId() : null, e);
 
             try {
                 sendMessage(bot, chatId, """
                         ❌ Unable to create the 1-hour reward link right now.
-
+                        
                         Please try again later or contact the admin.
                         """);
             } catch (Exception ignore) {
@@ -1342,12 +1296,7 @@ public class TelegramService {
         }
     }
 
-    private void handleDirectRewardClaim(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            TelegramUser user,
-            String startPayload
-    ) {
+    private void handleDirectRewardClaim(TelegramLongPollingBot bot, Long chatId, TelegramUser user, String startPayload) {
         try {
             searchStoryContext.remove(chatId);
 
@@ -1364,27 +1313,25 @@ public class TelegramService {
 
             // Do not stack a reward on top of manual/paid/global access if the
             // user's access situation changed after the short link was created.
-            if (subscriptionService.hasActiveSubscription(user)
-                    || globalTrialService.hasGlobalTrialAccess(user)) {
+            if (subscriptionService.hasActiveSubscription(user) || globalTrialService.hasGlobalTrialAccess(user)) {
 
                 sendMessage(bot, chatId, """
                         ✅ You already have active access.
-
+                        
                         The 1-hour reward was not started, so your reward time is not wasted.
                         """);
                 showMainMenu(bot, chatId);
                 return;
             }
 
-            RewardTrialService.ActivationResult result =
-                    rewardTrialService.activateByStartPayload(startPayload, user);
+            RewardTrialService.ActivationResult result = rewardTrialService.activateByStartPayload(startPayload, user);
 
             if (!result.success()) {
                 SendMessage message = new SendMessage();
                 message.setChatId(String.valueOf(chatId));
                 message.setText("""
                         ❌ Unable to activate the 1-hour reward.
-
+                        
                         %s
                         """.formatted(result.message()));
 
@@ -1402,38 +1349,28 @@ public class TelegramService {
                 return;
             }
 
-            String expiry = result.accessExpiresAt() == null
-                    ? "soon"
-                    : result.accessExpiresAt().format(
-                            DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a")
-                    );
+            String expiry = result.accessExpiresAt() == null ? "soon" : result.accessExpiresAt().format(DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a"));
 
-            String heading = result.alreadyActive()
-                    ? "✅ Your 1 Hour Free Access is already active!"
-                    : "🎉 1 Hour Free Access Activated!";
+            String heading = result.alreadyActive() ? "✅ Your 1 Hour Free Access is already active!" : "🎉 1 Hour Free Access Activated!";
 
             sendMessage(bot, chatId, """
                     %s
-
-                    ✅ ShrtFly reward verified through your one-time Telegram link.
+                    
+                    ✅ Reward verified through your one-time Telegram link.
                     ⏳ Valid until: %s
-
+                    
                     You can now choose a story and listen to episodes.
                     """.formatted(heading, expiry));
 
             showMainMenu(bot, chatId);
 
         } catch (Exception e) {
-            log.error(
-                    "handleDirectRewardClaim failed telegramId={}",
-                    user != null ? user.getTelegramId() : null,
-                    e
-            );
+            log.error("handleDirectRewardClaim failed telegramId={}", user != null ? user.getTelegramId() : null, e);
 
             try {
                 sendMessage(bot, chatId, """
                         ❌ Unable to activate the reward right now.
-
+                        
                         Please request a new 1-hour link and try again.
                         """);
             } catch (Exception ignore) {
@@ -1441,11 +1378,7 @@ public class TelegramService {
         }
     }
 
-    private void handleRewardSuccessReturn(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            TelegramUser user
-    ) {
+    private void handleRewardSuccessReturn(TelegramLongPollingBot bot, Long chatId, TelegramUser user) {
         try {
             searchStoryContext.remove(chatId);
 
@@ -1467,7 +1400,7 @@ public class TelegramService {
                 message.setChatId(String.valueOf(chatId));
                 message.setText("""
                         ❌ No active 1-hour reward was found.
-
+                        
                         The web return link itself cannot activate access.
                         Please complete a valid reward link and try again.
                         """);
@@ -1486,23 +1419,21 @@ public class TelegramService {
                 return;
             }
 
-            String expiry = activeReward.get().getExpiresAt()
-                    .format(DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a"));
+            String expiry = activeReward.get().getExpiresAt().format(DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a"));
 
             sendMessage(bot, chatId, """
                     🎉 1 Hour Free Access is Active!
-
+                    
                     ✅ Reward verified successfully.
                     ⏳ Valid until: %s
-
+                    
                     You can now choose a story and listen to episodes.
                     """.formatted(expiry));
 
             showMainMenu(bot, chatId);
 
         } catch (Exception e) {
-            log.error("handleRewardSuccessReturn failed telegramId={}",
-                    user != null ? user.getTelegramId() : null, e);
+            log.error("handleRewardSuccessReturn failed telegramId={}", user != null ? user.getTelegramId() : null, e);
         }
     }
 
@@ -2273,12 +2204,12 @@ public class TelegramService {
 
             case GLOBAL_TRIAL_ON -> sendMessage(bot, chatId, """
                     🌍 GLOBAL FREE TRIAL
-
+                    
                     Please provide campaign end date.
-
+                    
                     Usage:
                     /trailonsubscription 2026-08-31
-
+                    
                     Every eligible user receives maximum 7 days free access.
                     User access never exceeds the campaign end date.
                     """);
@@ -2290,7 +2221,7 @@ public class TelegramService {
                 if (disabled) {
                     sendMessage(bot, chatId, """
                             ⛔ GLOBAL FREE TRIAL DISABLED
-
+                            
                             Global free access stopped.
                             Paid subscriptions and individual manual trials remain active.
                             """);
@@ -2370,13 +2301,7 @@ public class TelegramService {
             return null;
         }
 
-        Set<String> reservedWords = Set.of(
-                "show", "get", "find", "user", "users", "details", "detail",
-                "history", "subscription", "subscriptions", "payment", "payments",
-                "activate", "trial", "trail", "monthly", "yearly", "lifetime",
-                "make", "admin", "expire", "expired", "active", "inactive",
-                "update", "role", "plan", "please", "for", "of"
-        );
+        Set<String> reservedWords = Set.of("show", "get", "find", "user", "users", "details", "detail", "history", "subscription", "subscriptions", "payment", "payments", "activate", "trial", "trail", "monthly", "yearly", "lifetime", "make", "admin", "expire", "expired", "active", "inactive", "update", "role", "plan", "please", "for", "of");
 
         for (String rawPart : text.trim().split("\\s+")) {
 
@@ -2428,11 +2353,11 @@ public class TelegramService {
 
         sendMessage(bot, chatId, """
                 👤 USER DETAILS
-
+                
                 Usage:
                 /userdetails @username
                 /userdetails 5999036520
-
+                
                 You can also type:
                 show user @username
                 """);
@@ -2442,11 +2367,11 @@ public class TelegramService {
 
         sendMessage(bot, chatId, """
                 📜 SUBSCRIPTION HISTORY
-
+                
                 Usage:
                 /history @username
                 /history 5999036520
-
+                
                 You can also type:
                 history @username
                 """);
@@ -2456,19 +2381,19 @@ public class TelegramService {
 
         sendMessage(bot, chatId, """
                 ⚙️ UPDATE USER
-
+                
                 Individual free trial:
                 trial @username
                 trial @username 15
-
+                
                 Paid plans:
                 activate @username monthly
                 activate @username yearly
                 activate @username lifetime
-
+                
                 Role:
                 make admin @username
-
+                
                 Expire current access:
                 expire @username
                 """);
@@ -2478,26 +2403,26 @@ public class TelegramService {
 
         sendMessage(bot, chatId, """
                 👑 OWNER PANEL
-
+                
                 👥 Users
                 /users
                 /userdetails @username
                 /activeusers
                 /expiredusers
-
+                
                 💳 Subscription
                 /history @username
                 /updateuser
-
+                
                 🌍 Global Free Trial
                 /trailonsubscription 2026-08-31
                 /trailoffsubscription
-
+                
                 📚 Stories
                 /stories
                 /syncstories
                 /deleteinactivestory
-
+                
                 ℹ️ Help
                 /usage
                 """);
@@ -2512,9 +2437,7 @@ public class TelegramService {
 
         boolean subscriptionActive = subscriptionService.hasActiveSubscription(user);
         boolean rewardTrialActive = !subscriptionActive && rewardTrialService.hasActiveRewardTrial(user);
-        boolean globalTrialActive = !subscriptionActive
-                && !rewardTrialActive
-                && globalTrialService.hasGlobalTrialAccess(user);
+        boolean globalTrialActive = !subscriptionActive && !rewardTrialActive && globalTrialService.hasGlobalTrialAccess(user);
 
         String accessSource;
 
@@ -2533,74 +2456,46 @@ public class TelegramService {
         List<Subscription> history = subscriptionService.getUserSubscriptionHistory(user);
         Subscription latest = history.isEmpty() ? null : history.get(0);
 
-        String username = user.getUsername() == null || user.getUsername().isBlank()
-                ? "No Username"
-                : "@" + user.getUsername();
+        String username = user.getUsername() == null || user.getUsername().isBlank() ? "No Username" : "@" + user.getUsername();
 
         String latestPlan = latest == null ? "-" : String.valueOf(latest.getPlan());
         String latestStatus = latest == null ? "-" : String.valueOf(latest.getStatus());
         String latestStart = latest == null ? "-" : String.valueOf(latest.getStartDate());
         String latestExpiry = latest == null ? "-" : String.valueOf(latest.getExpiryDate());
-        String rewardExpiry = rewardTrialService.getRewardExpiry(user)
-                .map(Object::toString)
-                .orElse("-");
+        String rewardExpiry = rewardTrialService.getRewardExpiry(user).map(Object::toString).orElse("-");
 
         sendMessage(bot, chatId, """
                 👤 USER DETAILS
-
+                
                 🆔 Telegram ID: %s
                 👤 Username: %s
                 📝 Name: %s %s
                 🎭 Role: %s
-
+                
                 🔐 Current Access: %s
-
+                
                 📦 Latest Plan: %s
                 📌 Latest Status: %s
                 📅 Start: %s
                 ⏳ Expiry: %s
                 🎁 Reward Expiry: %s
-
+                
                 🕒 Joined: %s
                 🕒 Last Active: %s
-                """.formatted(
-                user.getTelegramId(),
-                username,
-                user.getFirstName() == null ? "" : user.getFirstName(),
-                user.getLastName() == null ? "" : user.getLastName(),
-                user.getRole(),
-                accessSource,
-                latestPlan,
-                latestStatus,
-                latestStart,
-                latestExpiry,
-                rewardExpiry,
-                user.getJoinedAt(),
-                user.getLastActiveAt()
-        ));
+                """.formatted(user.getTelegramId(), username, user.getFirstName() == null ? "" : user.getFirstName(), user.getLastName() == null ? "" : user.getLastName(), user.getRole(), accessSource, latestPlan, latestStatus, latestStart, latestExpiry, rewardExpiry, user.getJoinedAt(), user.getLastActiveAt()));
     }
 
-    private void showUsersByAccessStatus(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            boolean activeAccess,
-            int page,
-            Integer messageId) {
+    private void showUsersByAccessStatus(TelegramLongPollingBot bot, Long chatId, boolean activeAccess, int page, Integer messageId) {
 
         try {
 
             int size = 10;
 
-            List<TelegramUser> filteredUsers = telegramUserService.getAllNonOwnerUsers()
-                    .stream()
-                    .filter(user -> subscriptionService.hasAccess(user) == activeAccess)
-                    .toList();
+            List<TelegramUser> filteredUsers = telegramUserService.getAllNonOwnerUsers().stream().filter(user -> subscriptionService.hasAccess(user) == activeAccess).toList();
 
             if (filteredUsers.isEmpty()) {
 
-                sendMessage(bot, chatId, activeAccess
-                        ? "✅ No active users found."
-                        : "✅ No expired/no-access users found.");
+                sendMessage(bot, chatId, activeAccess ? "✅ No active users found." : "✅ No expired/no-access users found.");
 
                 return;
             }
@@ -2612,27 +2507,20 @@ public class TelegramService {
 
             StringBuilder builder = new StringBuilder();
 
-            builder.append(activeAccess
-                    ? "✅ ACTIVE USERS\n\n"
-                    : "⛔ EXPIRED / NO-ACCESS USERS\n\n");
+            builder.append(activeAccess ? "✅ ACTIVE USERS\n\n" : "⛔ EXPIRED / NO-ACCESS USERS\n\n");
 
             for (TelegramUser user : filteredUsers.subList(start, end)) {
 
                 builder.append("🆔 ").append(user.getTelegramId()).append("\n");
                 builder.append("👤 ");
-                builder.append(user.getUsername() == null || user.getUsername().isBlank()
-                        ? "No Username"
-                        : "@" + user.getUsername());
+                builder.append(user.getUsername() == null || user.getUsername().isBlank() ? "No Username" : "@" + user.getUsername());
                 builder.append("\n");
                 builder.append("🎭 Role: ").append(user.getRole()).append("\n");
                 builder.append("🕒 Last Active: ").append(user.getLastActiveAt()).append("\n");
                 builder.append("━━━━━━━━━━━━━━\n");
             }
 
-            builder.append("\n📄 Page ")
-                    .append(safePage + 1)
-                    .append(" / ")
-                    .append(totalPages);
+            builder.append("\n📄 Page ").append(safePage + 1).append(" / ").append(totalPages);
 
             String callbackPrefix = activeAccess ? "activeusers_" : "expiredusers_";
             List<InlineKeyboardButton> row = new ArrayList<>();
@@ -3087,12 +2975,7 @@ public class TelegramService {
     // No episode pack/list is shown.
     // =========================================
 
-    private void openEpisodeSearch(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            TelegramUser requestingUser,
-            Long storyId
-    ) {
+    private void openEpisodeSearch(TelegramLongPollingBot bot, Long chatId, TelegramUser requestingUser, Long storyId) {
 
         try {
 
@@ -3118,7 +3001,7 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ❌ This story is currently unavailable.
-
+                        
                         Please choose another active story.
                         """);
 
@@ -3138,36 +3021,50 @@ public class TelegramService {
 
             searchStoryContext.put(chatId, storyId);
 
-            String usageInfo = requestingUser != null && requestingUser.getRole() == UserRole.USER
-                    ? """
+            EpisodeLimitPolicy limitPolicy = getEpisodeLimitPolicy(requestingUser);
 
-                    👤 USER Limits:
-                    • Max 50 per search
-                    • Max 200 per hour
-                    • Max 250 per day
-                    """
-                    : """
+            String usageInfo;
 
-                    👑 ADMIN / OWNER: Unlimited usage
-                    """;
+            if (limitPolicy == EpisodeLimitPolicy.REWARD_TRIAL) {
+                usageInfo = """
+                        
+                        🎁 1 Hour Reward Limits:
+                        • Max %d per search
+                        • Max %d per hour
+                        • Max %d per day
+                        """.formatted(limitPolicy.getPerSearch(), limitPolicy.getPerHour(), limitPolicy.getPerDay());
+            } else if (limitPolicy == EpisodeLimitPolicy.STANDARD_USER) {
+                usageInfo = """
+                        
+                        👤 USER Limits:
+                        • Max %d per search
+                        • Max %d per hour
+                        • Max %d per day
+                        """.formatted(limitPolicy.getPerSearch(), limitPolicy.getPerHour(), limitPolicy.getPerDay());
+            } else {
+                usageInfo = """
+                        
+                        👑 ADMIN / OWNER: Unlimited usage
+                        """;
+            }
 
             sendMessage(bot, chatId, """
                     🎧 %s
-
+                    
                     🔍 Custom Episode Search
-
+                    
                     Available up to: EP %d
-
+                    
                     Enter the episode range you need.
-
+                    
                     Examples:
                     1-50
                     51-100
                     120-150
-
-                    ⚠️ Maximum 50 episodes per search.
+                    
+                    ⚠️ Maximum %d episodes per search.
                     🎵 Audio files will be sent directly.%s
-                    """.formatted(story.getTitle(), latestEpisode, usageInfo));
+                    """.formatted(story.getTitle(), latestEpisode, limitPolicy.getPerSearch(), usageInfo));
 
         } catch (Exception e) {
 
@@ -3187,12 +3084,7 @@ public class TelegramService {
     // Maximum 50 episode numbers per request.
     // =========================================
 
-    private void handleEpisodeRangeSearch(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            TelegramUser requestingUser,
-            String text
-    ) {
+    private void handleEpisodeRangeSearch(TelegramLongPollingBot bot, Long chatId, TelegramUser requestingUser, String text) {
 
         try {
 
@@ -3202,7 +3094,7 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ❌ Search Context Not Found
-
+                        
                         Please select a story first.
                         """);
 
@@ -3218,9 +3110,9 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ❌ Invalid Episode Range
-
+                        
                         Episode numbers must be greater than 0.
-
+                        
                         Example: 20-50
                         """);
 
@@ -3231,9 +3123,9 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ❌ Invalid Range
-
+                        
                         Start episode cannot be greater than end episode.
-
+                        
                         Example: 20-50
                         """);
 
@@ -3242,18 +3134,21 @@ public class TelegramService {
 
             long requestedCount = (long) end - start + 1;
 
-            if (requestedCount > MAX_EPISODES_PER_SEARCH) {
+            EpisodeLimitPolicy limitPolicy = getEpisodeLimitPolicy(requestingUser);
+            int maxPerSearch = limitPolicy.getPerSearch();
+
+            if (requestedCount > maxPerSearch) {
 
                 sendMessage(bot, chatId, """
                         ❌ Search Range Too Large
-
-                        Maximum 50 episodes are allowed per search.
-
+                        
+                        Maximum %d episodes are allowed per search.
+                        
                         Examples:
                         1-50
                         51-100
                         101-150
-                        """);
+                        """.formatted(maxPerSearch));
 
                 return;
             }
@@ -3277,7 +3172,7 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ❌ This story is currently unavailable.
-
+                        
                         Please choose another active story.
                         """);
 
@@ -3293,7 +3188,7 @@ public class TelegramService {
 
                 sendMessage(bot, chatId, """
                         ⏳ Episodes are already being sent.
-
+                        
                         Please wait for the current batch to finish or stop
                         because of an access change before searching again.
                         """);
@@ -3342,60 +3237,92 @@ public class TelegramService {
 
     private boolean canForwardEpisodes(TelegramUser user) {
 
-        return user != null
-                && (user.getRole() == UserRole.ADMIN || user.getRole() == UserRole.OWNER);
+        return user != null && (user.getRole() == UserRole.ADMIN || user.getRole() == UserRole.OWNER);
     }
 
     private boolean isNormalUser(TelegramUser user) {
         return user != null && user.getRole() == UserRole.USER;
     }
 
-    private void sendEpisodeLimitMessage(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            EpisodeUsageService.EpisodeQuota quota,
-            int sentInCurrentBatch
-    ) throws Exception {
+    /**
+     * Resolves the effective episode limit policy for the user's CURRENT
+     * access source. All numeric limits live in EpisodeLimitPolicy.
+     * <p>
+     * Priority for normal USER accounts:
+     * 1. Paid / manual subscription -> STANDARD_USER
+     * 2. Global trial               -> STANDARD_USER
+     * 3. Short-link 1-hour reward   -> REWARD_TRIAL
+     * 4. No current access source   -> STANDARD_USER (access gate blocks use)
+     * <p>
+     * ADMIN / OWNER are unlimited.
+     */
+    private EpisodeLimitPolicy getEpisodeLimitPolicy(TelegramUser user) {
 
-        if (quota == null) {
+        if (user == null || user.getRole() == UserRole.ADMIN || user.getRole() == UserRole.OWNER) {
+            return EpisodeLimitPolicy.ADMIN_OWNER;
+        }
+
+        if (user.getRole() != UserRole.USER) {
+            return EpisodeLimitPolicy.ADMIN_OWNER;
+        }
+
+        // Paid plans and individual/manual FREE trials are represented by
+        // an active Subscription and always use the standard USER quota.
+        if (subscriptionService.hasActiveSubscription(user)) {
+            return EpisodeLimitPolicy.STANDARD_USER;
+        }
+
+        // Global trial takes priority if it is active while an old reward
+        // row still exists. This keeps the standard USER quota.
+        if (globalTrialService.hasGlobalTrialAccess(user)) {
+            return EpisodeLimitPolicy.STANDARD_USER;
+        }
+
+        if (rewardTrialService.hasActiveRewardTrial(user)) {
+            return EpisodeLimitPolicy.REWARD_TRIAL;
+        }
+
+        return EpisodeLimitPolicy.STANDARD_USER;
+    }
+
+    private void sendEpisodeLimitMessage(TelegramLongPollingBot bot, Long chatId, EpisodeUsageService.EpisodeQuota quota, EpisodeLimitPolicy policy, int sentInCurrentBatch) throws Exception {
+
+        if (quota == null || policy == null) {
             return;
         }
+
+        String accessType = policy == EpisodeLimitPolicy.REWARD_TRIAL ? "🎁 1 Hour Reward Access" : "👤 User Access";
+
+        String batchInfo = sentInCurrentBatch > 0 ? "This batch delivered " + sentInCurrentBatch + " episode(s) before the limit was reached." : "";
 
         String limitMessage;
 
         if ("DAILY_LIMIT".equals(quota.reason())) {
             limitMessage = """
                     ⛔ Daily Episode Limit Reached
-
-                    Today: %d / %d episodes used.
+                    
                     %s
-
+                    
+                    📅 Today: %d / %d
+                    ⏱ Hour: %d / %d
+                    
+                    %s
+                    
                     You can continue after the daily counter resets.
-                    """.formatted(
-                    quota.dailyUsed(),
-                    EpisodeUsageService.MAX_EPISODES_PER_DAY,
-                    sentInCurrentBatch > 0
-                            ? "This batch delivered " + sentInCurrentBatch + " episode(s) before the limit was reached."
-                            : "No more episodes can be sent today."
-            );
+                    """.formatted(accessType, quota.dailyUsed(), policy.getPerDay(), quota.hourlyUsed(), policy.getPerHour(), batchInfo);
         } else {
             limitMessage = """
                     ⛔ Hourly Episode Limit Reached
-
-                    Current 60-minute window: %d / %d episodes used.
-                    Daily usage: %d / %d.
+                    
                     %s
-
-                    You can continue after the hourly window resets.
-                    """.formatted(
-                    quota.hourlyUsed(),
-                    EpisodeUsageService.MAX_EPISODES_PER_HOUR,
-                    quota.dailyUsed(),
-                    EpisodeUsageService.MAX_EPISODES_PER_DAY,
-                    sentInCurrentBatch > 0
-                            ? "This batch delivered " + sentInCurrentBatch + " episode(s) before the limit was reached."
-                            : "No more episodes can be sent in the current hourly window."
-            );
+                    
+                    ⏱ Current Hour: %d / %d
+                    📅 Today: %d / %d
+                    
+                    %s
+                    
+                    You can continue after the hourly counter resets.
+                    """.formatted(accessType, quota.hourlyUsed(), policy.getPerHour(), quota.dailyUsed(), policy.getPerDay(), batchInfo);
         }
 
         sendMessage(bot, chatId, limitMessage);
@@ -3410,14 +3337,7 @@ public class TelegramService {
     // NO EPISODE BUTTONS
     // =========================================
 
-    private void sendEpisodesByRange(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            TelegramUser requestingUser,
-            Story story,
-            int start,
-            int end
-    ) {
+    private void sendEpisodesByRange(TelegramLongPollingBot bot, Long chatId, TelegramUser requestingUser, Story story, int start, int end) {
 
         try {
 
@@ -3447,17 +3367,20 @@ public class TelegramService {
 
             int requestedCount = end - start + 1;
 
-            if (requestedCount > MAX_EPISODES_PER_SEARCH) {
+            EpisodeLimitPolicy initialLimitPolicy = getEpisodeLimitPolicy(requestingUser);
+            int maxPerSearch = initialLimitPolicy.getPerSearch();
+
+            if (requestedCount > maxPerSearch) {
 
                 sendMessage(bot, chatId, """
-                        ❌ Maximum 50 episodes
+                        ❌ Maximum %d episodes
                         allowed per search.
                         
                         Example:
                         
                         1-50
                         51-100
-                        """);
+                        """.formatted(maxPerSearch));
 
                 return;
             }
@@ -3468,10 +3391,11 @@ public class TelegramService {
             // =====================================
 
             if (isNormalUser(requestingUser)) {
-                EpisodeUsageService.EpisodeQuota quota = episodeUsageService.getQuota(requestingUser);
+                EpisodeLimitPolicy policy = getEpisodeLimitPolicy(requestingUser);
+                EpisodeUsageService.EpisodeQuota quota = episodeUsageService.getQuota(requestingUser, policy);
 
                 if (!quota.allowed()) {
-                    sendEpisodeLimitMessage(bot, chatId, quota, 0);
+                    sendEpisodeLimitMessage(bot, chatId, quota, policy, 0);
                     return;
                 }
             }
@@ -3527,16 +3451,13 @@ public class TelegramService {
                 // USER must stop receiving files immediately.
                 if (!subscriptionService.hasAccess(requestingUser)) {
 
-                    log.info("Episode batch stopped because access ended telegramId={} storyId={} sentCount={}",
-                            requestingUser != null ? requestingUser.getTelegramId() : null,
-                            story.getId(),
-                            sentCount);
+                    log.info("Episode batch stopped because access ended telegramId={} storyId={} sentCount={}", requestingUser != null ? requestingUser.getTelegramId() : null, story.getId(), sentCount);
 
                     sendMessage(bot, chatId, """
                             ⛔ Access Ended
-
+                            
                             Your free trial/subscription is no longer active.
-
+                            
                             Remaining episodes were not sent.
                             """);
 
@@ -3556,19 +3477,15 @@ public class TelegramService {
                 }
 
                 if (isNormalUser(requestingUser)) {
-                    EpisodeUsageService.EpisodeQuota quota = episodeUsageService.getQuota(requestingUser);
+                    // Resolve the policy again before every audio so a change
+                    // in access source while a batch is running is respected.
+                    EpisodeLimitPolicy policy = getEpisodeLimitPolicy(requestingUser);
+                    EpisodeUsageService.EpisodeQuota quota = episodeUsageService.getQuota(requestingUser, policy);
 
                     if (!quota.allowed()) {
-                        log.info(
-                                "Episode batch stopped by usage limit telegramId={} reason={} hourly={}/{} daily={}/{} sentCount={}",
-                                requestingUser.getTelegramId(),
-                                quota.reason(),
-                                quota.hourlyUsed(), EpisodeUsageService.MAX_EPISODES_PER_HOUR,
-                                quota.dailyUsed(), EpisodeUsageService.MAX_EPISODES_PER_DAY,
-                                sentCount
-                        );
+                        log.info("Episode batch stopped by usage limit " + "telegramId={} policy={} reason={} " + "hourly={}/{} daily={}/{} sentCount={}", requestingUser.getTelegramId(), policy, quota.reason(), quota.hourlyUsed(), policy.getPerHour(), quota.dailyUsed(), policy.getPerDay(), sentCount);
 
-                        sendEpisodeLimitMessage(bot, chatId, quota, sentCount);
+                        sendEpisodeLimitMessage(bot, chatId, quota, policy, sentCount);
                         return;
                     }
                 }
@@ -3596,7 +3513,8 @@ public class TelegramService {
                         scheduleAutoDeleteBotMessage(bot, chatId, sentAudioMessage.getMessageId());
                     }
 
-                    episodeUsageService.recordEpisodeDelivered(requestingUser);
+                    EpisodeLimitPolicy deliveredPolicy = getEpisodeLimitPolicy(requestingUser);
+                    episodeUsageService.recordEpisodeDelivered(requestingUser, deliveredPolicy);
                 }
 
                 sentCount++;
@@ -3678,11 +3596,7 @@ public class TelegramService {
     // ADMIN/OWNER -> unprotected + no auto delete
     // =========================================
 
-    private Message executeSendMessage(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            SendMessage sendMessage
-    ) throws Exception {
+    private Message executeSendMessage(TelegramLongPollingBot bot, Long chatId, SendMessage sendMessage) throws Exception {
 
         TelegramUser recipient = telegramUserService.getUserByTelegramId(chatId);
         boolean protectedContent = !canForwardEpisodes(recipient);
@@ -3706,32 +3620,24 @@ public class TelegramService {
     // actual server-side rule for normal USER accounts.
     // =========================================
 
-    private void rejectNonTextUserMessage(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            Message message
-    ) {
+    private void rejectNonTextUserMessage(TelegramLongPollingBot bot, Long chatId, Message message) {
 
         Integer messageId = message != null ? message.getMessageId() : null;
 
-        log.info("Blocked non-text private input telegramId={} chatId={} messageId={}",
-                message != null && message.getFrom() != null ? message.getFrom().getId() : null,
-                chatId,
-                messageId);
+        log.info("Blocked non-text private input telegramId={} chatId={} messageId={}", message != null && message.getFrom() != null ? message.getFrom().getId() : null, chatId, messageId);
 
         if (messageId != null) {
             try {
                 bot.execute(new DeleteMessage(String.valueOf(chatId), messageId));
             } catch (Exception e) {
-                log.warn("Failed to delete blocked private input chatId={} messageId={} reason={}",
-                        chatId, messageId, e.getMessage());
+                log.warn("Failed to delete blocked private input chatId={} messageId={} reason={}", chatId, messageId, e.getMessage());
             }
         }
 
         try {
             sendMessage(bot, chatId, """
                     ✍️ Text messages only.
-
+                    
                     Files, photos, audio, video, voice, stickers, polls,
                     locations and contacts are not accepted here.
                     """);
@@ -3740,11 +3646,7 @@ public class TelegramService {
         }
     }
 
-    private void scheduleAutoDeleteBotMessage(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            Integer messageId
-    ) {
+    private void scheduleAutoDeleteBotMessage(TelegramLongPollingBot bot, Long chatId, Integer messageId) {
 
         if (chatId == null || messageId == null) {
             return;
@@ -3754,17 +3656,12 @@ public class TelegramService {
             try {
                 bot.execute(new DeleteMessage(String.valueOf(chatId), messageId));
             } catch (Exception e) {
-                log.debug("Auto delete skipped/failed chatId={} messageId={} reason={}",
-                        chatId, messageId, e.getMessage());
+                log.debug("Auto delete skipped/failed chatId={} messageId={} reason={}", chatId, messageId, e.getMessage());
             }
         }, AUTO_DELETE_HOURS, TimeUnit.HOURS);
     }
 
-    private void autoDeleteUserMessage(
-            TelegramLongPollingBot bot,
-            Long chatId,
-            Integer userMessageId
-    ) {
+    private void autoDeleteUserMessage(TelegramLongPollingBot bot, Long chatId, Integer userMessageId) {
 
         // Bot responses are already scheduled by executeSendMessage().
         // This helper only removes the triggering USER message in the
@@ -3780,8 +3677,7 @@ public class TelegramService {
             try {
                 bot.execute(new DeleteMessage(String.valueOf(chatId), userMessageId));
             } catch (Exception e) {
-                log.debug("Auto delete user message skipped/failed chatId={} messageId={} reason={}",
-                        chatId, userMessageId, e.getMessage());
+                log.debug("Auto delete user message skipped/failed chatId={} messageId={} reason={}", chatId, userMessageId, e.getMessage());
             }
         }, AUTO_DELETE_HOURS, TimeUnit.HOURS);
     }

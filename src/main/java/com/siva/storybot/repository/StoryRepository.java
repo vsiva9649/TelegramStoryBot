@@ -23,25 +23,25 @@ public interface StoryRepository extends JpaRepository<Story, Long> {
     // COMPLETED STORIES
     // =====================================
     @Query("""
-    SELECT s
-    FROM Story s
-    WHERE s.active = true
-      AND s.isCompleted = true
-    """)
+            SELECT s
+            FROM Story s
+            WHERE s.active = true
+              AND s.isCompleted = true
+            """)
     Page<Story> getCompletedStories(Pageable pageable);
 
     // =====================================
     // ONGOING STORIES
     // =====================================
     @Query("""
-    SELECT s
-    FROM Story s
-    WHERE s.active = true
-      AND (
-            s.isCompleted = false
-            OR s.isCompleted IS NULL
-          )
-    """)
+            SELECT s
+            FROM Story s
+            WHERE s.active = true
+              AND (
+                    s.isCompleted = false
+                    OR s.isCompleted IS NULL
+                  )
+            """)
     Page<Story> getOnGoingStories(Pageable pageable);
 
     List<Story> findByActiveFalse();
