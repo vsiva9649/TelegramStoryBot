@@ -239,12 +239,15 @@ public class TelegramService {
                             
                             STORY GROUP : {}
                             FILE ID      : {}
+                            TITLE        : {}
+                            PERFORMER    : {}
                             FILE NAME    : {}
+                            CAPTION      : {}
                             DURATION     : {}
                             FILE SIZE    : {}
                             MIME TYPE    : {}
                             
-                            """, chat.getTitle(), audio.getFileId(), audio.getFileName(), audio.getDuration(), audio.getFileSize(), audio.getMimeType());
+                            """, chat.getTitle(), audio.getFileId(), audio.getTitle(), audio.getPerformer(), audio.getFileName(), message.getCaption(), audio.getDuration(), audio.getFileSize(), audio.getMimeType());
 
                     Story story = storyService.findOrCreateStory(
 
