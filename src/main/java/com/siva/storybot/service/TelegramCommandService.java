@@ -136,6 +136,9 @@ public class TelegramCommandService {
                 new BotCommand("activeusers", "View users with current access"),
 
                 new BotCommand("expiredusers", "View users without current access"),
+                new BotCommand("approveadmin", "Approve user as admin"),
+
+                new BotCommand("disapproveadmin", "Remove admin role"),
 
                 // =================================
                 // SUBSCRIPTION MANAGEMENT

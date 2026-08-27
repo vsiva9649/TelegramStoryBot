@@ -42,17 +42,34 @@ public class StoryService {
 
             if (existingStory != null) {
 
-                existingStory.setTitle(title);
+                // Receiving a real Telegram update from this chat proves that
+                // the story is reachable. Re-activate rows that may have been
+                // incorrectly marked inactive by an older sync attempt.
+                existingStory.setActive(true);
 
-                existingStory.setTelegramUsername(telegramUsername);
+                // loadChatFullDetails() can temporarily fail because of
+                // Telegram rate limits/network errors. Never overwrite valid
+                // stored metadata with null values from that failure.
+                if (title != null && !title.isBlank()) {
+                    existingStory.setTitle(title);
+                }
 
-                existingStory.setChatType(chatType);
+                if (telegramUsername != null) {
+                    existingStory.setTelegramUsername(telegramUsername);
+                }
 
-                existingStory.setDescription(description);
+                if (chatType != null && !chatType.isBlank()) {
+                    existingStory.setChatType(chatType);
+                }
 
-                existingStory.setInviteLink(inviteLink);
+                if (description != null) {
+                    existingStory.setDescription(description);
+                    existingStory.setIsCompleted(isCompleted);
+                }
 
-                existingStory.setIsCompleted(isCompleted);
+                if (inviteLink != null) {
+                    existingStory.setInviteLink(inviteLink);
+                }
 
                 storyRepository.save(existingStory);
 

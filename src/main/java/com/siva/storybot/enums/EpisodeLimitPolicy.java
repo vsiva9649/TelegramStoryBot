@@ -9,11 +9,12 @@ package com.siva.storybot.enums;
  */
 public enum EpisodeLimitPolicy {
 
-    REWARD_TRIAL(50, 50, 150),
+    // perSearch, perHour, perDay
+    REWARD_TRIAL(5, 10, 15),
 
-    STANDARD_USER(50, 200, 250),
+    STANDARD_USER(50, 500, 1000),
 
-    ADMIN_OWNER(50, Integer.MAX_VALUE, Integer.MAX_VALUE);
+    ADMIN_OWNER(250, Integer.MAX_VALUE, Integer.MAX_VALUE);
 
     private final int perSearch;
     private final int perHour;

@@ -253,11 +253,11 @@ public class TelegramService {
 
                             chatId,
 
-                            chatFullInfo.getTitle(),
+                            chatFullInfo.getTitle() != null ? chatFullInfo.getTitle() : chat.getTitle(),
 
-                            chatFullInfo.getUsername(),
+                            chatFullInfo.getUsername() != null ? chatFullInfo.getUsername() : chat.getUserName(),
 
-                            chatFullInfo.getChatType(),
+                            chatFullInfo.getChatType() != null ? chatFullInfo.getChatType() : chatType,
 
                             chatFullInfo.getDescription(),
 
@@ -432,14 +432,22 @@ public class TelegramService {
             }
 
             // =====================================
-            // CUSTOM EPISODE RANGE SEARCH
+            // CUSTOM EPISODE SEARCH INPUT
             //
-            // IMPORTANT:
-            // This is checked before OWNER commands so
-            // OWNER can also type ranges like 1-50.
+            // Supported formats after a story is selected:
+            //   10
+            //   10-15
+            //   10 to 15
+            //
+            // A single number is only treated as episode input while
+            // a story search context is active. This avoids stealing
+            // OWNER commands that may contain a Telegram numeric ID.
             // =====================================
 
-            if (text.matches("\\d+\\s*-\\s*\\d+")) {
+            boolean episodeSearchInput = text.matches("\\d+")
+                    || text.matches("(?i)\\d+\\s*(?:-|to)\\s*\\d+");
+
+            if (episodeSearchInput && searchStoryContext.containsKey(chatId)) {
 
                 handleEpisodeRangeSearch(bot, chatId, telegramUser, text);
 
@@ -826,7 +834,9 @@ public class TelegramService {
 
             List<List<InlineKeyboardButton>> rows = new ArrayList<>();
 
-            int count = 1;
+            // Keep row numbers continuous across pagination.
+            // Page 1 => 01-10, Page 2 => 11-20, Page 3 => 21-30, ...
+            int count = stories.getNumber() * stories.getSize() + 1;
 
             for (Story story : stories) {
 
@@ -1063,6 +1073,59 @@ public class TelegramService {
 
                 int page = Integer.parseInt(data.replace("expiredusers_", ""));
                 showUsersByAccessStatus(bot, chatId, false, page, messageId);
+                return;
+            }
+
+            // =====================================
+            // ADMIN ROLE APPROVE / DISAPPROVE (OWNER)
+            // callback format:
+            // admin_approve_<telegramId>_<page>
+            // admin_disapprove_<telegramId>_<page>
+            // =====================================
+
+            if (data.startsWith("admin_approve_") || data.startsWith("admin_disapprove_")) {
+
+                if (user.getRole() != UserRole.OWNER) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                String[] split = data.split("_");
+
+                if (split.length != 4) {
+                    sendMessage(bot, chatId, "❌ Invalid admin role action.");
+                    return;
+                }
+
+                boolean approve = "approve".equals(split[1]);
+                Long targetTelegramId = Long.parseLong(split[2]);
+                int sourcePage = Integer.parseInt(split[3]);
+
+                TelegramUser targetUser = telegramUserService.getUserByTelegramId(targetTelegramId);
+
+                if (targetUser == null) {
+                    sendMessage(bot, chatId, "❌ User not found.");
+                    return;
+                }
+
+                if (targetUser.getRole() == UserRole.OWNER) {
+                    sendMessage(bot, chatId, "❌ OWNER role cannot be changed here.");
+                    return;
+                }
+
+                UserRole newRole = approve ? UserRole.ADMIN : UserRole.USER;
+                telegramUserService.updateUserRole(targetUser, newRole);
+
+                // Refresh the same management page immediately so the
+                // button changes from Approve <-> Disapprove.
+                showUsers(bot, chatId, sourcePage, messageId);
+
+                String displayUser = targetUser.getUsername() == null || targetUser.getUsername().isBlank()
+                        ? String.valueOf(targetUser.getTelegramId())
+                        : "@" + targetUser.getUsername();
+
+                sendMessage(bot, chatId, "✅ " + displayUser + " role changed to " + newRole + ".");
+
                 return;
             }
 
@@ -1599,10 +1662,17 @@ public class TelegramService {
                     user 5999036520
                     
                     ━━━━━━━━━━━━━━
-                    🎭 ROLE UPDATE
+                    🎭 ADMIN ROLE MANAGEMENT
                     ━━━━━━━━━━━━━━
                     
-                    make admin @username
+                    Approve Admin:
+                    
+                    /approveAdmin @username
+                    
+                    
+                    DisApprove Admin:
+                    
+                    /disApproveAdmin @username
                     
                     ━━━━━━━━━━━━━━
                     🎁 INDIVIDUAL FREE TRIAL
@@ -1916,15 +1986,162 @@ public class TelegramService {
         }
 
         // =====================================
+// ADMIN APPROVE COMMAND
+//
+// Example:
+// /approveAdmin @john
+// =====================================
+
+        if ("/approveadmin".equals(ownerCommand)) {
+
+
+            if (!chatId.equals(telegramConfig.getOwnerId())) {
+
+                sendMessage(bot, chatId, """
+                ❌ Access Denied
+                
+                Only OWNER can approve admin.
+                """);
+
+                return;
+            }
+
+
+            TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+
+            if(targetUser == null){
+
+                sendMessage(bot, chatId, """
+                ❌ User not found
+                
+                Usage:
+                
+                /approveAdmin @username
+                """);
+
+                return;
+            }
+
+
+            if(targetUser.getRole() == UserRole.OWNER){
+
+                sendMessage(bot, chatId,
+                        "❌ OWNER role cannot be changed.");
+
+                return;
+            }
+
+
+            telegramUserService.updateUserRole(
+                    targetUser,
+                    UserRole.ADMIN
+            );
+
+
+            sendMessage(bot, chatId, """
+            ✅ ADMIN APPROVED
+            
+            👤 User:
+            @%s
+            
+            🎭 Role:
+            ADMIN
+            """.formatted(
+                    targetUser.getUsername()
+            ));
+
+
+            return;
+        }
+
+
+
+// =====================================
+// ADMIN DISAPPROVE COMMAND
+//
+// Example:
+// /disApproveAdmin @john
+// =====================================
+
+
+        if ("/disapproveadmin".equals(ownerCommand)) {
+
+
+            if (!chatId.equals(telegramConfig.getOwnerId())) {
+
+                sendMessage(bot, chatId, """
+                ❌ Access Denied
+                
+                Only OWNER can remove admin.
+                """);
+
+                return;
+            }
+
+
+            TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+
+            if(targetUser == null){
+
+                sendMessage(bot, chatId, """
+                ❌ User not found
+                
+                Usage:
+                
+                /disApproveAdmin @username
+                """);
+
+                return;
+            }
+
+
+            if(targetUser.getRole() == UserRole.OWNER){
+
+                sendMessage(bot, chatId,
+                        "❌ OWNER role cannot be changed.");
+
+                return;
+            }
+
+
+
+            telegramUserService.updateUserRole(
+                    targetUser,
+                    UserRole.USER
+            );
+
+
+            sendMessage(bot, chatId, """
+            ❌ ADMIN DISAPPROVED
+            
+            👤 User:
+            @%s
+            
+            🎭 New Role:
+            USER
+            """.formatted(
+                    targetUser.getUsername()
+            ));
+
+
+            return;
+        }
+
+        // =====================================
         // UPDATE USER / SUBSCRIPTION
         // =====================================
 
         boolean wantsTrial = containsOwnerKeyword(text, "trial") || containsOwnerKeyword(text, "trail");
         boolean wantsActivate = containsOwnerKeyword(text, "activate");
-        boolean wantsAdmin = containsOwnerKeyword(text, "admin");
+        boolean wantsDisapproveAdmin = containsOwnerKeyword(text, "disapprove")
+                || containsOwnerKeyword(text, "revoke")
+                || (containsOwnerKeyword(text, "remove") && containsOwnerKeyword(text, "admin"));
+        boolean wantsAdmin = containsOwnerKeyword(text, "admin") && !wantsDisapproveAdmin;
         boolean wantsExpire = containsOwnerKeyword(text, "expire");
 
-        if (wantsTrial || wantsActivate || wantsAdmin || wantsExpire) {
+        if (wantsTrial || wantsActivate || wantsAdmin || wantsDisapproveAdmin || wantsExpire) {
 
             TelegramUser targetUser = null;
 
@@ -1934,7 +2151,7 @@ public class TelegramService {
 
                 // SKIP RESERVED WORDS
 
-                if (value.equals("trial") || value.equals("trail") || value.equals("activate") || value.equals("admin") || value.equals("expire") || value.equals("monthly") || value.equals("yearly") || value.equals("lifetime") || value.equals("make") || value.equals("history") || value.equals("show") || value.equals("subscription")) {
+                if (value.equals("trial") || value.equals("trail") || value.equals("activate") || value.equals("admin") || value.equals("disapprove") || value.equals("revoke") || value.equals("remove") || value.equals("expire") || value.equals("monthly") || value.equals("yearly") || value.equals("lifetime") || value.equals("make") || value.equals("history") || value.equals("show") || value.equals("subscription")) {
 
                     continue;
                 }
@@ -1974,6 +2191,44 @@ public class TelegramService {
                         trial @username
                         activate @username monthly
                         """);
+
+                return;
+            }
+
+            // DISAPPROVE / REVOKE ADMIN -> USER
+
+            if (wantsDisapproveAdmin) {
+
+                if (!chatId.equals(telegramConfig.getOwnerId())) {
+
+                    log.warn("Unauthorized admin role revoke attempt chatId={}", chatId);
+
+                    sendMessage(bot, chatId, """
+                            ❌ Access Denied
+
+                            Only Bot Owner can remove
+                            ADMIN role.
+                            """);
+
+                    return;
+                }
+
+                if (targetUser.getRole() == UserRole.OWNER) {
+                    sendMessage(bot, chatId, "❌ OWNER role cannot be changed.");
+                    return;
+                }
+
+                telegramUserService.updateUserRole(targetUser, UserRole.USER);
+
+                sendMessage(bot, chatId, """
+                        ✅ ADMIN DISAPPROVED
+
+                        👤 User :
+                        @%s
+
+                        🎭 Role :
+                        USER
+                        """.formatted(targetUser.getUsername()));
 
                 return;
             }
@@ -2383,23 +2638,26 @@ public class TelegramService {
     private void sendUpdateUserHelp(TelegramLongPollingBot bot, Long chatId) throws Exception {
 
         sendMessage(bot, chatId, """
-                ⚙️ UPDATE USER
-                
-                Individual free trial:
-                trial @username
-                trial @username 15
-                
-                Paid plans:
-                activate @username monthly
-                activate @username yearly
-                activate @username lifetime
-                
-                Role:
-                make admin @username
-                
-                Expire current access:
-                expire @username
-                """);
+            ⚙️ UPDATE USER
+            
+            Individual free trial:
+            trial @username
+            trial @username 15
+            
+            Paid plans:
+            activate @username monthly
+            activate @username yearly
+            activate @username lifetime
+            
+            Admin Role:
+            
+            /approveAdmin @username
+            
+            /disApproveAdmin @username
+            
+            Expire current access:
+            expire @username
+            """);
     }
 
     private void sendOwnerPanel(TelegramLongPollingBot bot, Long chatId) throws Exception {
@@ -2587,6 +2845,8 @@ public class TelegramService {
 
             builder.append("👑 USERS MANAGEMENT PANEL\n\n");
 
+            List<List<InlineKeyboardButton>> actionRows = new ArrayList<>();
+
             users.forEach(user -> {
 
                 builder.append("🆔 ").append(user.getTelegramId()).append("\n");
@@ -2609,6 +2869,22 @@ public class TelegramService {
                 builder.append("🕒 Last Active : ").append(user.getLastActiveAt()).append("\n");
 
                 builder.append("━━━━━━━━━━━━━━\n");
+
+                String displayUser = user.getUsername() == null || user.getUsername().isBlank()
+                        ? String.valueOf(user.getTelegramId())
+                        : "@" + user.getUsername();
+
+                InlineKeyboardButton roleButton = new InlineKeyboardButton();
+
+                if (user.getRole() == UserRole.ADMIN) {
+                    roleButton.setText("❌ Disapprove Admin · " + displayUser);
+                    roleButton.setCallbackData("admin_disapprove_" + user.getTelegramId() + "_" + page);
+                } else {
+                    roleButton.setText("✅ Approve Admin · " + displayUser);
+                    roleButton.setCallbackData("admin_approve_" + user.getTelegramId() + "_" + page);
+                }
+
+                actionRows.add(List.of(roleButton));
             });
 
             builder.append("\n");
@@ -2653,7 +2929,11 @@ public class TelegramService {
 
             InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
 
-            keyboard.setKeyboard(List.of(row));
+            if (!row.isEmpty()) {
+                actionRows.add(row);
+            }
+
+            keyboard.setKeyboard(actionRows);
 
             // =====================================
             // EDIT
@@ -2881,7 +3161,7 @@ public class TelegramService {
 
             List<List<InlineKeyboardButton>> rows = new ArrayList<>();
 
-            int count = 1;
+            int count = stories.getNumber() * stories.getSize() + 1;
 
             for (Story story : stories) {
 
@@ -3058,12 +3338,12 @@ public class TelegramService {
                     
                     Available up to: EP %d
                     
-                    Enter the episode range you need.
+                    Enter a single episode or a range.
                     
                     Examples:
-                    1-50
-                    51-100
-                    120-150
+                    10
+                    10-15
+                    10 to 15
                     
                     ⚠️ Maximum %d episodes per search.
                     🎵 Audio files will be sent directly.%s
@@ -3104,10 +3384,34 @@ public class TelegramService {
                 return;
             }
 
-            String[] split = text.split("-");
+            String normalized = text == null ? "" : text.trim().toLowerCase();
 
-            int start = Integer.parseInt(split[0].trim());
-            int end = Integer.parseInt(split[1].trim());
+            // Accept both range separators: "10-15" and "10 to 15".
+            normalized = normalized.replaceAll("\\s*to\\s*", "-")
+                    .replaceAll("\\s*-\\s*", "-");
+
+            int start;
+            int end;
+
+            if (normalized.matches("\\d+")) {
+                // Single episode search: 10 => start=10, end=10
+                start = Integer.parseInt(normalized);
+                end = start;
+            } else if (normalized.matches("\\d+-\\d+")) {
+                String[] split = normalized.split("-", 2);
+                start = Integer.parseInt(split[0]);
+                end = Integer.parseInt(split[1]);
+            } else {
+                sendMessage(bot, chatId, """
+                        ❌ Invalid Episode Search
+
+                        Supported formats:
+                        10
+                        10-15
+                        10 to 15
+                        """);
+                return;
+            }
 
             if (start <= 0 || end <= 0) {
 
@@ -3116,7 +3420,7 @@ public class TelegramService {
                         
                         Episode numbers must be greater than 0.
                         
-                        Example: 20-50
+                        Examples: 10, 10-15, 10 to 15
                         """);
 
                 return;
@@ -3221,7 +3525,7 @@ public class TelegramService {
         } catch (NumberFormatException e) {
 
             try {
-                sendMessage(bot, chatId, "❌ Invalid range. Example: 1-50");
+                sendMessage(bot, chatId, "❌ Invalid episode search. Use 10, 10-15, or 10 to 15.");
             } catch (Exception ignore) {
             }
 
@@ -3699,7 +4003,8 @@ public class TelegramService {
             }
 
             int updated = 0;
-            int deleted = 0;
+            int inactive = 0;
+            int temporaryErrors = 0;
 
             for (Story story : stories) {
 
@@ -3709,45 +4014,65 @@ public class TelegramService {
 
                     var chat = bot.execute(getChat);
 
-                    boolean completed = chat.getDescription() != null && chat.getDescription().toLowerCase().contains("completed");
+                    boolean completed = chat.getDescription() != null
+                            && chat.getDescription().toLowerCase().contains("completed");
 
                     story.setTitle(chat.getTitle());
-
                     story.setTelegramUsername(chat.getUserName());
-
                     story.setChatType(chat.getType());
-
                     story.setDescription(chat.getDescription());
-
                     story.setInviteLink(chat.getInviteLink());
-
                     story.setIsCompleted(completed);
-
                     story.setActive(true);
 
                     storyService.save(story);
-
                     updated++;
 
                 } catch (Exception ex) {
 
-                    log.warn("Channel deleted/not accessible chatId={}", story.getTelegramChatId());
+                    // IMPORTANT:
+                    // Do NOT mark a story inactive for transient Telegram failures
+                    // such as HTTP 429/flood control, timeout, DNS/network errors,
+                    // or temporary Telegram API issues. With 30+ chats the old
+                    // code could falsely deactivate valid stories during /syncstories.
+                    if (isPermanentStoryUnavailable(ex)) {
 
-                    story.setActive(false);
+                        log.warn("Story permanently unavailable; marking inactive chatId={} reason={}",
+                                story.getTelegramChatId(), ex.getMessage());
 
-                    storyService.save(story);
+                        story.setActive(false);
+                        storyService.save(story);
+                        inactive++;
 
-                    deleted++;
+                    } else {
+
+                        temporaryErrors++;
+
+                        log.warn("Story sync temporary failure; keeping current active state chatId={} reason={}",
+                                story.getTelegramChatId(), ex.getMessage());
+                    }
+                }
+
+                // Be gentle with Telegram when syncing a large library.
+                // This also reduces 429/flood-control responses.
+                try {
+                    Thread.sleep(100L);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
 
             sendMessage(bot, chatId, """
                     ✅ Story Sync Completed
-                    
-                    📚 Total Stories : %d
-                    ✅ Updated       : %d
-                    ❌ Inactive      : %d
-                    """.formatted(stories.size(), updated, deleted));
+
+                    📚 Total Stories    : %d
+                    ✅ Updated          : %d
+                    ❌ Inactive         : %d
+                    ⚠️ Temporary Errors : %d
+
+                    Temporary API/network errors are NOT deactivated.
+                    """.formatted(stories.size(), updated, inactive, temporaryErrors));
 
         } catch (Exception e) {
 
@@ -3761,6 +4086,37 @@ public class TelegramService {
 
             }
         }
+    }
+
+    /**
+     * Returns true only when Telegram clearly says the bot can no longer
+     * access that chat. Generic/transient exceptions must never deactivate
+     * a valid story.
+     */
+    private boolean isPermanentStoryUnavailable(Exception exception) {
+
+        Throwable current = exception;
+
+        while (current != null) {
+
+            String message = current.getMessage();
+
+            if (message != null) {
+
+                String normalized = message.toLowerCase();
+
+                if (normalized.contains("chat not found")
+                        || normalized.contains("bot was kicked")
+                        || normalized.contains("bot is not a member")
+                        || normalized.contains("bot was blocked")) {
+                    return true;
+                }
+            }
+
+            current = current.getCause();
+        }
+
+        return false;
     }
 
     private void deleteInactiveStories(TelegramLongPollingBot bot, Long chatId) {
@@ -3779,21 +4135,70 @@ public class TelegramService {
             }
 
             int deleted = 0;
+            int restored = 0;
+            int skipped = 0;
 
             for (Story story : stories) {
 
-                log.info("Deleting inactive story={}", story.getTitle());
+                try {
 
-                storyService.deleteStory(story);
+                    // Re-check before destructive deletion. Older versions
+                    // could mark valid stories inactive on 429/network errors.
+                    GetChat getChat = new GetChat(String.valueOf(story.getTelegramChatId()));
+                    var chat = bot.execute(getChat);
 
-                deleted++;
+                    boolean completed = chat.getDescription() != null
+                            && chat.getDescription().toLowerCase().contains("completed");
+
+                    story.setTitle(chat.getTitle());
+                    story.setTelegramUsername(chat.getUserName());
+                    story.setChatType(chat.getType());
+                    story.setDescription(chat.getDescription());
+                    story.setInviteLink(chat.getInviteLink());
+                    story.setIsCompleted(completed);
+                    story.setActive(true);
+                    storyService.save(story);
+
+                    restored++;
+
+                    log.info("Inactive story restored instead of deleted chatId={} title={}",
+                            story.getTelegramChatId(), story.getTitle());
+
+                } catch (Exception ex) {
+
+                    if (isPermanentStoryUnavailable(ex)) {
+
+                        log.info("Deleting confirmed unavailable story chatId={} title={}",
+                                story.getTelegramChatId(), story.getTitle());
+
+                        storyService.deleteStory(story);
+                        deleted++;
+
+                    } else {
+
+                        // Never delete on a temporary Telegram/network error.
+                        skipped++;
+
+                        log.warn("Inactive cleanup temporary failure; keeping story chatId={} reason={}",
+                                story.getTelegramChatId(), ex.getMessage());
+                    }
+                }
+
+                try {
+                    Thread.sleep(100L);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
 
             sendMessage(bot, chatId, """
                     ✅ Inactive Story Cleanup Completed
-                    
-                    🗑 Deleted Stories : %d
-                    """.formatted(deleted));
+
+                    ♻️ Restored Valid Stories : %d
+                    🗑 Confirmed Deleted       : %d
+                    ⚠️ Temporary Errors       : %d
+                    """.formatted(restored, deleted, skipped));
 
         } catch (Exception e) {
 
@@ -3801,7 +4206,7 @@ public class TelegramService {
 
             try {
 
-                sendMessage(bot, chatId, "❌ Failed to delete inactive stories.");
+                sendMessage(bot, chatId, "❌ Failed to clean inactive stories.");
 
             } catch (Exception ignore) {
 

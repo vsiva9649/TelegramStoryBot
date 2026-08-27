@@ -18,7 +18,7 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
-
+import jakarta.annotation.PostConstruct;
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -30,7 +30,7 @@ public class GroqService {
     // GROQ CONFIGURATION
     // =========================================================
 
-    @Value("${groq.api.key:}")
+    @Value("${groq.api.key:${GROQ_API_KEY:}}")
     private String apiKey;
 
     @Value("${groq.url:https://api.groq.com/openai/v1/chat/completions}")
@@ -46,6 +46,40 @@ public class GroqService {
     // Episode detection AI fallback
     @Value("${groq.episode-detection.enabled:false}")
     private boolean episodeDetectionEnabled;
+
+    @PostConstruct
+    public void initGroq(){
+
+        if(isGroqConfigured()){
+
+            log.info("""
+                
+                =====================================
+                GROQ CONFIGURED
+                
+                Model : {}
+                
+                =====================================
+                """,
+                    model
+            );
+
+        }else{
+
+
+            log.warn("""
+                
+                =====================================
+                GROQ NOT CONFIGURED
+                
+                Running without AI fallback
+                
+                Local commands will work normally
+                
+                =====================================
+                """);
+        }
+    }
 
     // =========================================================
     // OWNER INTENT
@@ -373,6 +407,15 @@ public class GroqService {
 
     private String executeGroq(String systemPrompt, String userMessage, Duration timeout, String operation) {
 
+        if(!isGroqConfigured()){
+
+            log.debug(
+                    "Groq skipped operation={} because configuration missing",
+                    operation
+            );
+
+            return null;
+        }
         try {
 
             GroqRequest request = GroqRequest.builder().model(model).messages(List.of(GroqRequest.Message.builder().role("system").content(systemPrompt).build(),
