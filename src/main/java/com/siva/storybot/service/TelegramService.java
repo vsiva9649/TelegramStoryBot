@@ -15,6 +15,7 @@ import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.GetChat;
 import org.telegram.telegrambots.meta.api.methods.send.SendAudio;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
@@ -56,6 +57,10 @@ public class TelegramService {
     private final EpisodeUsageService episodeUsageService;
     private final RewardTrialService rewardTrialService;
     private final Map<Long, Long> searchStoryContext = new ConcurrentHashMap<>();
+
+    // ADMIN / OWNER story icon upload state: private chat id -> selected story id
+    private final Map<Long, Long> storyIconUploadContext = new ConcurrentHashMap<>();
+
     private final Set<Long> activeEpisodeBatches = ConcurrentHashMap.newKeySet();
 
     // =========================================
@@ -348,6 +353,17 @@ public class TelegramService {
 
             if (!message.hasText()) {
 
+                // ADMIN / OWNER: when a story was selected through
+                // /addstoryicon (or legacy /storyicon), the next media input
+                // is routed to the icon-upload handler. The handler accepts
+                // only Telegram photos and gives a clear message otherwise.
+                if (isAdminOrOwner(telegramUser)
+                        && storyIconUploadContext.containsKey(chatId)) {
+
+                    handleStoryIconUpload(bot, chatId, telegramUser, message);
+                    return;
+                }
+
                 if (isNormalUser(telegramUser)) {
                     rejectNonTextUserMessage(bot, chatId, message);
                 } else {
@@ -463,7 +479,17 @@ public class TelegramService {
             // =====================================
 
             if (text.equalsIgnoreCase("🏠 Main Menu")) {
-                showMainMenu(bot, chatId);
+
+                // OWNER returns to the management panel.
+                // USER / ADMIN keep the existing public story main menu.
+                if (telegramUser.getRole() == UserRole.OWNER) {
+                    searchStoryContext.remove(chatId);
+                    storyIconUploadContext.remove(chatId);
+                    sendOwnerPanel(bot, chatId);
+                } else {
+                    showMainMenu(bot, chatId);
+                }
+
                 return;
             }
 
@@ -494,6 +520,38 @@ public class TelegramService {
 
             if (text.equalsIgnoreCase("🆘 Help")) {
                 showHelpMenu(bot, chatId);
+                return;
+            }
+
+            // =====================================
+            // STORY ICON MANAGEMENT - ADMIN / OWNER ONLY
+            //
+            // /addstoryicon    -> upload / replace a story icon
+            // /removestoryicon -> remove a story icon
+            // /storyicon       -> legacy alias for /addstoryicon
+            // =====================================
+
+            if (isAddStoryIconCommand(text)) {
+
+                if (!isAdminOrOwner(telegramUser)) {
+                    sendMessage(bot, chatId, "❌ Admin access required.");
+                    return;
+                }
+
+                storyIconUploadContext.remove(chatId);
+                showAddStoryIconSelection(bot, chatId, 0);
+                return;
+            }
+
+            if (isRemoveStoryIconCommand(text)) {
+
+                if (!isAdminOrOwner(telegramUser)) {
+                    sendMessage(bot, chatId, "❌ Admin access required.");
+                    return;
+                }
+
+                storyIconUploadContext.remove(chatId);
+                showRemoveStoryIconSelection(bot, chatId, 0);
                 return;
             }
 
@@ -1195,6 +1253,126 @@ public class TelegramService {
             }
 
             // =====================================
+            // STORY ICON MANAGEMENT - ADMIN / OWNER ONLY
+            // =====================================
+
+            // ADD / REPLACE ICON pagination
+            if (data.startsWith("addstoryicon_page_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                int page = Integer.parseInt(data.replace("addstoryicon_page_", ""));
+                showAddStoryIconSelection(bot, chatId, page);
+                return;
+            }
+
+            // ADD / REPLACE ICON story selection
+            if (data.startsWith("addstoryicon_select_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                Long storyId = Long.parseLong(data.replace("addstoryicon_select_", ""));
+                prepareStoryIconUpload(bot, chatId, storyId);
+                return;
+            }
+
+            // REMOVE ICON pagination
+            if (data.startsWith("removestoryicon_page_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                int page = Integer.parseInt(data.replace("removestoryicon_page_", ""));
+                showRemoveStoryIconSelection(bot, chatId, page);
+                return;
+            }
+
+            // REMOVE ICON story selection -> confirmation screen.
+            if (data.startsWith("removestoryicon_select_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                String payload = data.replace("removestoryicon_select_", "");
+                String[] split = payload.split("_", 2);
+
+                Long storyId = Long.parseLong(split[0]);
+                int page = split.length > 1 ? Integer.parseInt(split[1]) : 0;
+
+                showRemoveStoryIconConfirmation(bot, chatId, storyId, page);
+                return;
+            }
+
+            // Confirm icon removal.
+            if (data.startsWith("removestoryicon_confirm_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                String payload = data.replace("removestoryicon_confirm_", "");
+                String[] split = payload.split("_", 2);
+
+                Long storyId = Long.parseLong(split[0]);
+                int page = split.length > 1 ? Integer.parseInt(split[1]) : 0;
+
+                removeStoryIcon(bot, chatId, storyId, page);
+                return;
+            }
+
+            // Cancel icon removal and return to the previous page.
+            if (data.startsWith("removestoryicon_cancel_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                int page = Integer.parseInt(data.replace("removestoryicon_cancel_", ""));
+                showRemoveStoryIconSelection(bot, chatId, page);
+                return;
+            }
+
+            // =====================================
+            // LEGACY /storyicon CALLBACK SUPPORT
+            // =====================================
+
+            if (data.startsWith("storyicon_page_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                int page = Integer.parseInt(data.replace("storyicon_page_", ""));
+                showAddStoryIconSelection(bot, chatId, page);
+                return;
+            }
+
+            if (data.startsWith("storyicon_select_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                Long storyId = Long.parseLong(data.replace("storyicon_select_", ""));
+                prepareStoryIconUpload(bot, chatId, storyId);
+                return;
+            }
+
+            // =====================================
             // STORY OPEN -> DIRECT CUSTOM SEARCH
             //
             // No episode pack/list screen is shown.
@@ -1547,62 +1725,13 @@ public class TelegramService {
         // START
         // =====================================
 
-        if ("/start".equals(ownerCommand)) {
+        if (isOwnerPanelCommand(ownerCommand)) {
 
-            sendMessage(bot, chatId, """
-                    👑 Welcome, Owner!
-                    
-                    🤖 StoryBot is ready.
-                    
-                    ━━━━━━━━━━━━━━
-                    📚 FEATURES
-                    ━━━━━━━━━━━━━━
-                    
-                    🎧 Audio Story Streaming
-                       Users can listen to stories
-                       directly inside Telegram
-                    
-                    🔍 Custom Episode Search
-                       Select a story and enter a range
-                       Example: 20-50
-                       Maximum 50 episodes per search
-                    
-                    💳 Subscription System
-                       FREE
-                       MONTHLY
-                       YEARLY
-                       LIFETIME
-                    
-                    🌍 Global Free Trial
-                       Enable free access for
-                       all eligible users
-                    
-                    🧭 Owner Command Routing
-                       Local-first, optional AI fallback
-                    
-                    ━━━━━━━━━━━━━━
-                    👑 OWNER COMMANDS
-                    ━━━━━━━━━━━━━━
-                    
-                    /stories
-                    /usage
-                    
-                    /trailonsubscription 2026-08-31
-                    
-                    /trailoffsubscription
-                    
-                    ━━━━━━━━━━━━━━
-                    ⚡ QUICK ACTIONS
-                    ━━━━━━━━━━━━━━
-                    
-                    show users
-                    
-                    trial @username
-                    
-                    activate @username monthly
-                    
-                    history @username
-                    """);
+            // /start, /panel and /ownerpanel all open the same
+            // deterministic OWNER management panel.
+            searchStoryContext.remove(chatId);
+            storyIconUploadContext.remove(chatId);
+            sendOwnerPanel(bot, chatId);
 
             return;
         }
@@ -1725,6 +1854,16 @@ public class TelegramService {
                     /syncstories
                     
                     /deleteinactivestory
+
+                    /addstoryicon
+
+                    /removestoryicon
+
+                    ━━━━━━━━━━━━━━
+                    👑 OWNER PANEL
+                    ━━━━━━━━━━━━━━
+
+                    /panel
                     """);
 
             return;
@@ -2536,6 +2675,17 @@ public class TelegramService {
         return false;
     }
 
+    private boolean isOwnerPanelCommand(String ownerCommand) {
+
+        if (ownerCommand == null || ownerCommand.isBlank()) {
+            return false;
+        }
+
+        return "/start".equals(ownerCommand)
+                || "/panel".equals(ownerCommand)
+                || "/ownerpanel".equals(ownerCommand);
+    }
+
     private String normalizeOwnerCommand(String text) {
 
         if (text == null || text.isBlank()) {
@@ -2662,30 +2812,43 @@ public class TelegramService {
 
     private void sendOwnerPanel(TelegramLongPollingBot bot, Long chatId) throws Exception {
 
+        // Keep this panel command-driven so all existing owner handlers
+        // continue to work exactly as before. This is only the OWNER home UI.
         sendMessage(bot, chatId, """
                 👑 OWNER PANEL
-                
-                👥 Users
+
+                👥 USER MANAGEMENT
                 /users
                 /userdetails @username
                 /activeusers
                 /expiredusers
-                
-                💳 Subscription
+
+                🎭 ADMIN MANAGEMENT
+                /approveAdmin @username
+                /disApproveAdmin @username
+
+                💳 SUBSCRIPTION MANAGEMENT
                 /history @username
                 /updateuser
-                
-                🌍 Global Free Trial
+
+                🌍 GLOBAL FREE TRIAL
                 /trailonsubscription 2026-08-31
                 /trailoffsubscription
-                
-                📚 Stories
+
+                📚 STORY MANAGEMENT
                 /stories
                 /syncstories
                 /deleteinactivestory
-                
-                ℹ️ Help
+
+                🖼️ STORY ICON MANAGEMENT
+                /addstoryicon
+                /removestoryicon
+
+                ℹ️ HELP
                 /usage
+
+                🏠 PANEL
+                /panel
                 """);
     }
 
@@ -3331,7 +3494,7 @@ public class TelegramService {
                         """;
             }
 
-            sendMessage(bot, chatId, """
+            String storyDetailsText = """
                     🎧 %s
                     
                     🔍 Custom Episode Search
@@ -3347,7 +3510,10 @@ public class TelegramService {
                     
                     ⚠️ Maximum %d episodes per search.
                     🎵 Audio files will be sent directly.%s
-                    """.formatted(story.getTitle(), latestEpisode, limitPolicy.getPerSearch(), usageInfo));
+                    """.formatted(story.getTitle(), latestEpisode, limitPolicy.getPerSearch(), usageInfo);
+
+            // Only the presentation changes here. Episode/search/access logic above stays untouched.
+            sendStoryDetailsWithIcon(bot, chatId, story, storyDetailsText);
 
         } catch (Exception e) {
 
@@ -3532,6 +3698,438 @@ public class TelegramService {
         } catch (Exception e) {
 
             log.error("handleEpisodeRangeSearch failed chatId={} text={}", chatId, text, e);
+        }
+    }
+
+    // =========================================
+    // STORY ICON MANAGEMENT
+    // ADMIN / OWNER ONLY
+    // =========================================
+
+    private boolean isAdminOrOwner(TelegramUser user) {
+
+        return user != null
+                && (user.getRole() == UserRole.ADMIN || user.getRole() == UserRole.OWNER);
+    }
+
+    /**
+     * New explicit add/replace command.
+     *
+     * /storyicon is kept as a legacy alias so existing usage does not break.
+     */
+    private boolean isAddStoryIconCommand(String text) {
+
+        if (text == null) {
+            return false;
+        }
+
+        String value = text.trim().toLowerCase();
+
+        return value.equals("/addstoryicon")
+                || value.startsWith("/addstoryicon@")
+                || value.equals("/storyicon")
+                || value.startsWith("/storyicon@");
+    }
+
+    private boolean isRemoveStoryIconCommand(String text) {
+
+        if (text == null) {
+            return false;
+        }
+
+        String value = text.trim().toLowerCase();
+
+        return value.equals("/removestoryicon")
+                || value.startsWith("/removestoryicon@");
+    }
+
+    // =========================================
+    // ADD / REPLACE STORY ICON - STORY LIST
+    // =========================================
+
+    private void showAddStoryIconSelection(TelegramLongPollingBot bot, Long chatId, int page) throws Exception {
+
+        try {
+
+            int size = 10;
+            Page<Story> stories = storyService.getStories(page, size);
+
+            if (stories.isEmpty()) {
+                sendMessage(bot, chatId, "❌ No stories available.");
+                return;
+            }
+
+            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+            for (Story story : stories) {
+
+                InlineKeyboardButton button = new InlineKeyboardButton();
+
+                boolean hasIcon = story.getStoryIconFileId() != null
+                        && !story.getStoryIconFileId().isBlank();
+
+                String iconStatus = hasIcon ? "♻️" : "🖼️";
+
+                button.setText(iconStatus + " " + story.getTitle());
+                button.setCallbackData("addstoryicon_select_" + story.getId());
+
+                rows.add(List.of(button));
+            }
+
+            List<InlineKeyboardButton> nav = new ArrayList<>();
+
+            if (page > 0) {
+                InlineKeyboardButton prev = new InlineKeyboardButton();
+                prev.setText("⬅️ Prev");
+                prev.setCallbackData("addstoryicon_page_" + (page - 1));
+                nav.add(prev);
+            }
+
+            InlineKeyboardButton pageButton = new InlineKeyboardButton();
+            pageButton.setText("📄 " + (page + 1) + "/" + stories.getTotalPages());
+            pageButton.setCallbackData("ignore");
+            nav.add(pageButton);
+
+            if (stories.hasNext()) {
+                InlineKeyboardButton next = new InlineKeyboardButton();
+                next.setText("Next ➡️");
+                next.setCallbackData("addstoryicon_page_" + (page + 1));
+                nav.add(next);
+            }
+
+            rows.add(nav);
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(rows);
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("""
+                    🖼️ Add / Replace Story Icon
+
+                    Select a story below.
+
+                    🖼️ = No icon yet
+                    ♻️ = Existing icon will be replaced
+                    """);
+            message.setReplyMarkup(keyboard);
+
+            executeSendMessage(bot, chatId, message);
+
+        } catch (Exception e) {
+            log.error("showAddStoryIconSelection failed", e);
+            sendMessage(bot, chatId, "❌ Unable to load stories for icon upload.");
+        }
+    }
+
+    // =========================================
+    // PREPARE STORY ICON UPLOAD
+    // =========================================
+
+    private void prepareStoryIconUpload(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Long storyId) throws Exception {
+
+        Story story = storyService.getStoryById(storyId);
+
+        if (story == null) {
+            storyIconUploadContext.remove(chatId);
+            sendMessage(bot, chatId, "❌ Story not found.");
+            return;
+        }
+
+        storyIconUploadContext.put(chatId, storyId);
+
+        boolean replacing = story.getStoryIconFileId() != null
+                && !story.getStoryIconFileId().isBlank();
+
+        sendMessage(bot, chatId, """
+                🖼️ Story Icon Upload
+
+                Story: %s
+                Action: %s
+
+                Send the story image/photo now.
+
+                ℹ️ Please send it as a Telegram photo.
+                """.formatted(
+                story.getTitle(),
+                replacing ? "Replace Existing Icon" : "Add New Icon"));
+    }
+
+    // =========================================
+    // RECEIVE AND SAVE STORY ICON PHOTO
+    // =========================================
+
+    private void handleStoryIconUpload(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser telegramUser,
+            Message message) throws Exception {
+
+        try {
+
+            if (!isAdminOrOwner(telegramUser)) {
+                storyIconUploadContext.remove(chatId);
+                sendMessage(bot, chatId, "❌ Admin access required.");
+                return;
+            }
+
+            Long storyId = storyIconUploadContext.get(chatId);
+
+            if (storyId == null) {
+                return;
+            }
+
+            Story story = storyService.getStoryById(storyId);
+
+            if (story == null) {
+                storyIconUploadContext.remove(chatId);
+                sendMessage(bot, chatId, "❌ Story not found.");
+                return;
+            }
+
+            if (!message.hasPhoto() || message.getPhoto() == null || message.getPhoto().isEmpty()) {
+                sendMessage(bot, chatId, "❌ Please send the image as a Telegram photo.");
+                return;
+            }
+
+            // Telegram returns different PhotoSize values for the same image.
+            // The last entry is the largest one. Store only Telegram file_id.
+            var photos = message.getPhoto();
+            var largestPhoto = photos.get(photos.size() - 1);
+
+            story.setStoryIconFileId(largestPhoto.getFileId());
+            storyService.save(story);
+
+            storyIconUploadContext.remove(chatId);
+
+            sendMessage(bot, chatId, """
+                    ✅ Story icon saved successfully.
+
+                    Story: %s
+                    """.formatted(story.getTitle()));
+
+        } catch (Exception e) {
+            log.error("handleStoryIconUpload failed", e);
+            sendMessage(bot, chatId, "❌ Unable to save story icon.");
+        }
+    }
+
+    // =========================================
+    // REMOVE STORY ICON - STORY LIST
+    // =========================================
+
+    private void showRemoveStoryIconSelection(TelegramLongPollingBot bot, Long chatId, int page) throws Exception {
+
+        try {
+
+            int size = 10;
+            Page<Story> stories = storyService.getStories(page, size);
+
+            if (stories.isEmpty()) {
+                sendMessage(bot, chatId, "❌ No stories available.");
+                return;
+            }
+
+            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+            for (Story story : stories) {
+
+                InlineKeyboardButton button = new InlineKeyboardButton();
+
+                boolean hasIcon = story.getStoryIconFileId() != null
+                        && !story.getStoryIconFileId().isBlank();
+
+                String iconStatus = hasIcon ? "🗑️" : "➖";
+                String suffix = hasIcon ? "" : " (No Icon)";
+
+                button.setText(iconStatus + " " + story.getTitle() + suffix);
+                button.setCallbackData("removestoryicon_select_" + story.getId() + "_" + page);
+
+                rows.add(List.of(button));
+            }
+
+            List<InlineKeyboardButton> nav = new ArrayList<>();
+
+            if (page > 0) {
+                InlineKeyboardButton prev = new InlineKeyboardButton();
+                prev.setText("⬅️ Prev");
+                prev.setCallbackData("removestoryicon_page_" + (page - 1));
+                nav.add(prev);
+            }
+
+            InlineKeyboardButton pageButton = new InlineKeyboardButton();
+            pageButton.setText("📄 " + (page + 1) + "/" + stories.getTotalPages());
+            pageButton.setCallbackData("ignore");
+            nav.add(pageButton);
+
+            if (stories.hasNext()) {
+                InlineKeyboardButton next = new InlineKeyboardButton();
+                next.setText("Next ➡️");
+                next.setCallbackData("removestoryicon_page_" + (page + 1));
+                nav.add(next);
+            }
+
+            rows.add(nav);
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(rows);
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("""
+                    🗑️ Remove Story Icon
+
+                    Select a story below.
+
+                    🗑️ = Icon exists and can be removed
+                    ➖ = Story currently has no icon
+                    """);
+            message.setReplyMarkup(keyboard);
+
+            executeSendMessage(bot, chatId, message);
+
+        } catch (Exception e) {
+            log.error("showRemoveStoryIconSelection failed", e);
+            sendMessage(bot, chatId, "❌ Unable to load stories for icon removal.");
+        }
+    }
+
+    // =========================================
+    // REMOVE STORY ICON - CONFIRMATION
+    // =========================================
+
+    private void showRemoveStoryIconConfirmation(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Long storyId,
+            int page) throws Exception {
+
+        Story story = storyService.getStoryById(storyId);
+
+        if (story == null) {
+            sendMessage(bot, chatId, "❌ Story not found.");
+            return;
+        }
+
+        if (story.getStoryIconFileId() == null || story.getStoryIconFileId().isBlank()) {
+            sendMessage(bot, chatId, """
+                    ℹ️ This story does not have an icon.
+
+                    Story: %s
+                    """.formatted(story.getTitle()));
+            return;
+        }
+
+        InlineKeyboardButton confirm = new InlineKeyboardButton();
+        confirm.setText("✅ Yes, Remove Icon");
+        confirm.setCallbackData("removestoryicon_confirm_" + storyId + "_" + page);
+
+        InlineKeyboardButton cancel = new InlineKeyboardButton();
+        cancel.setText("❌ Cancel");
+        cancel.setCallbackData("removestoryicon_cancel_" + page);
+
+        InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+        keyboard.setKeyboard(List.of(
+                List.of(confirm),
+                List.of(cancel)));
+
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText("""
+                ⚠️ Remove Story Icon?
+
+                Story: %s
+
+                This removes only the saved story icon.
+                Story and episode data will not be deleted.
+                """.formatted(story.getTitle()));
+        message.setReplyMarkup(keyboard);
+
+        executeSendMessage(bot, chatId, message);
+    }
+
+    // =========================================
+    // REMOVE SELECTED STORY ICON
+    // =========================================
+
+    private void removeStoryIcon(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Long storyId,
+            int page) throws Exception {
+
+        try {
+
+            Story story = storyService.getStoryById(storyId);
+
+            if (story == null) {
+                sendMessage(bot, chatId, "❌ Story not found.");
+                return;
+            }
+
+            if (story.getStoryIconFileId() == null || story.getStoryIconFileId().isBlank()) {
+                sendMessage(bot, chatId, """
+                        ℹ️ This story does not have an icon.
+
+                        Story: %s
+                        """.formatted(story.getTitle()));
+                return;
+            }
+
+            story.setStoryIconFileId(null);
+            storyService.save(story);
+
+            // Only the icon file_id is removed. Story, episodes and all
+            // subscription/access data remain unchanged.
+            sendMessage(bot, chatId, """
+                    ✅ Story icon removed successfully.
+
+                    Story: %s
+                    """.formatted(story.getTitle()));
+
+            // Stay in the remove flow so multiple icons can be managed.
+            showRemoveStoryIconSelection(bot, chatId, Math.max(page, 0));
+
+        } catch (Exception e) {
+            log.error("removeStoryIcon failed storyId={}", storyId, e);
+            sendMessage(bot, chatId, "❌ Unable to remove story icon.");
+        }
+    }
+
+    // =========================================
+    // STORY DETAILS WITH OPTIONAL ICON
+    // =========================================
+
+    private void sendStoryDetailsWithIcon(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Story story,
+            String detailsText) throws Exception {
+
+        String fileId = story.getStoryIconFileId();
+
+        if (fileId == null || fileId.isBlank()) {
+            sendMessage(bot, chatId, detailsText);
+            return;
+        }
+
+        try {
+
+            SendPhoto sendPhoto = new SendPhoto();
+            sendPhoto.setChatId(String.valueOf(chatId));
+            sendPhoto.setPhoto(new InputFile(fileId));
+            sendPhoto.setCaption(detailsText);
+
+            bot.execute(sendPhoto);
+
+        } catch (Exception e) {
+
+            // A stale/invalid Telegram file_id must never break story access.
+            log.warn("Story icon send failed storyId={} - falling back to text", story.getId(), e);
+            sendMessage(bot, chatId, detailsText);
         }
     }
 

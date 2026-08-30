@@ -125,6 +125,8 @@ public class TelegramCommandService {
 
                 new BotCommand("start", "Open owner panel"),
 
+                new BotCommand("panel", "Open owner panel anytime"),
+
                 // =================================
                 // USER MANAGEMENT
                 // =================================
@@ -165,6 +167,10 @@ public class TelegramCommandService {
                 new BotCommand("syncstories", "Sync story channels"),
 
                 new BotCommand("deleteinactivestory", "Delete inactive stories"),
+
+                new BotCommand("addstoryicon", "Add or replace story icon"),
+
+                new BotCommand("removestoryicon", "Remove story icon"),
 
                 // =================================
                 // HELP

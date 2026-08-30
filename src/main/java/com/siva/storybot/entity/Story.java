@@ -44,6 +44,11 @@ public class Story {
 
     private Boolean isCompleted; //description = completed
 
+    // Telegram photo file_id used as the story cover/icon in the bot UI.
+    // ADMIN / OWNER can manage this through /addstoryicon and /removestoryicon.
+    @Column(name = "story_icon_file_id")
+    private String storyIconFileId;
+
     @OneToMany(
             mappedBy = "story",
             cascade = CascadeType.ALL,
