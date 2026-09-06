@@ -51,8 +51,8 @@ public class EpisodeUsageService {
     /**
      * Returns the user's current usage against the supplied policy.
      * <p>
-     * USER + REWARD_TRIAL  -> 50/hour, 50/day
-     * USER + STANDARD_USER -> 200/hour, 250/day
+     * USER + REWARD_TRIAL  -> limits from EpisodeLimitPolicy.REWARD_TRIAL
+     * USER + STANDARD_USER -> limits from EpisodeLimitPolicy.STANDARD_USER
      * ADMIN/OWNER          -> unlimited regardless of supplied policy
      */
     @Transactional
@@ -84,8 +84,8 @@ public class EpisodeUsageService {
     /**
      * Records one successfully delivered episode using the supplied policy.
      * <p>
-     * The quota is checked before incrementing so a reward user cannot be
-     * recorded above 50/hour or 50/day through this method.
+     * The quota is checked before incrementing so a user cannot be recorded
+     * above the configured hourly/daily limits for the active policy.
      */
     @Transactional
     public synchronized EpisodeQuota recordEpisodeDelivered(TelegramUser user, EpisodeLimitPolicy policy) {

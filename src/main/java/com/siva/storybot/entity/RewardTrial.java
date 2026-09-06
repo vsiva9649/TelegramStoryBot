@@ -17,7 +17,8 @@ import java.time.LocalDateTime;
         indexes = {
                 @Index(name = "idx_reward_trial_user", columnList = "telegram_user_id"),
                 @Index(name = "idx_reward_trial_status", columnList = "status"),
-                @Index(name = "idx_reward_trial_expires", columnList = "expires_at")
+                @Index(name = "idx_reward_trial_expires", columnList = "expires_at"),
+                @Index(name = "idx_reward_trial_selected_story", columnList = "selected_story_id")
         },
         uniqueConstraints = {
                 @UniqueConstraint(name = "uk_reward_trial_token", columnNames = "token")
@@ -32,6 +33,18 @@ public class RewardTrial {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "telegram_user_id", nullable = false)
     private TelegramUser telegramUser;
+
+    /**
+     * Story selected for THIS reward activation.
+     *
+     * A reward user may browse every active story, but the first story selected
+     * during the active reward is bound here. The 1-hour reward can deliver
+     * episodes only from this one story. A new reward row starts with null and
+     * can therefore select a different story next time.
+     */
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "selected_story_id")
+    private Story selectedStory;
 
     @Column(nullable = false, length = 64)
     private String token;

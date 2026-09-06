@@ -19,6 +19,10 @@ public interface TelegramUserRepository extends JpaRepository<TelegramUser, Long
 
     Optional<TelegramUser> findByUsername(String username);
 
+    Optional<TelegramUser> findByUsernameIgnoreCase(String username);
+
+    List<TelegramUser> findAllByRole(UserRole role);
+
     Page<TelegramUser> findByRoleNotOrderByLastActiveAtDesc(UserRole role, Pageable pageable);
 
     List<TelegramUser> findByRoleNotOrderByLastActiveAtDesc(UserRole role);

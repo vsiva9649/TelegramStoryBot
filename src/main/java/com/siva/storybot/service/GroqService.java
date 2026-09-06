@@ -494,9 +494,9 @@ public class GroqService {
 
             case "/updateuser" -> OwnerIntent.UPDATE_USER;
 
-            case "/trailonsubscription" -> OwnerIntent.GLOBAL_TRIAL_ON;
+            case "/trialonsubscription", "/trailonsubscription" -> OwnerIntent.GLOBAL_TRIAL_ON;
 
-            case "/trailoffsubscription" -> OwnerIntent.GLOBAL_TRIAL_OFF;
+            case "/trialoffsubscription", "/trailoffsubscription" -> OwnerIntent.GLOBAL_TRIAL_OFF;
 
             default -> detectLocalNaturalLanguageIntent(normalized);
         };

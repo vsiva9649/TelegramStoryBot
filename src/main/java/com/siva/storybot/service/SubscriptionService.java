@@ -34,7 +34,7 @@ public class SubscriptionService {
     //
     // PRIORITY:
     //
-    // 1. OWNER / ADMIN
+    // 1. OWNER / ADMIN bypass subscription/trial checks only
     // 2. ACTIVE NORMAL SUBSCRIPTION
     // 3. MANUAL FREE TRIAL SUBSCRIPTION
     // 4. REWARDED 1-HOUR FREE ACCESS
@@ -52,7 +52,10 @@ public class SubscriptionService {
             }
 
             // =====================================
-            // OWNER / ADMIN BYPASS
+            // OWNER / ADMIN SUBSCRIPTION BYPASS
+            //
+            // IMPORTANT: Story-level authorization is enforced separately
+            // by StoryAccessService. ADMIN does NOT automatically get all stories.
             // =====================================
 
             if (telegramUser.getRole() == UserRole.OWNER || telegramUser.getRole() == UserRole.ADMIN) {

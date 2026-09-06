@@ -244,7 +244,7 @@ public class TelegramUserService {
 
         String cleanedUsername = username.trim().replace("@", "");
 
-        return telegramUserRepository.findByUsername(cleanedUsername).orElse(null);
+        return telegramUserRepository.findByUsernameIgnoreCase(cleanedUsername).orElse(null);
     }
 
     // =========================================

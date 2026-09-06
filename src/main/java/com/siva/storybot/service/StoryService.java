@@ -2,6 +2,8 @@ package com.siva.storybot.service;
 
 import com.siva.storybot.entity.Story;
 import com.siva.storybot.repository.StoryRepository;
+import com.siva.storybot.repository.RewardTrialRepository;
+import com.siva.storybot.repository.UserStoryAccessRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -20,6 +22,8 @@ public class StoryService {
 
 
     private final StoryRepository storyRepository;
+    private final UserStoryAccessRepository userStoryAccessRepository;
+    private final RewardTrialRepository rewardTrialRepository;
 
     // =========================================
     // FIND OR CREATE STORY
@@ -128,6 +132,12 @@ public class StoryService {
                 PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "id")));
     }
 
+    public Page<Story> getActiveStories(int page, int size) {
+
+        return storyRepository.findByActiveTrue(
+                PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "id")));
+    }
+
     // =====================================
     // GET STORY BY ID
     // =====================================
@@ -175,6 +185,14 @@ public class StoryService {
     @Transactional
     public void deleteStory(Story story) {
 
+        if (story == null) {
+            return;
+        }
+
+        // Remove permanent user mappings and clear any reward-scoped story
+        // selection before deleting the story so foreign keys do not block it.
+        userStoryAccessRepository.deleteAllByStory(story);
+        rewardTrialRepository.clearSelectedStory(story);
         storyRepository.delete(story);
     }
 }

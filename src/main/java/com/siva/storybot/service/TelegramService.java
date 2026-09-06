@@ -47,15 +47,20 @@ import java.util.concurrent.TimeUnit;
 public class TelegramService {
 
     private static final int AUTO_DELETE_HOURS = 24;
+    private static final int USERS_PAGE_SIZE = 50;
+    private static final DateTimeFormatter USER_MANAGEMENT_DATE_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("dd-MM-yyyy hh:mm a");
     private final TelegramConfig telegramConfig;
     private final TelegramUserService telegramUserService;
     private final SubscriptionService subscriptionService;
     private final GlobalTrialService globalTrialService;
     private final GroqService groqService;
     private final StoryService storyService;
+    private final StoryAccessService storyAccessService;
     private final EpisodeService episodeService;
     private final EpisodeUsageService episodeUsageService;
     private final RewardTrialService rewardTrialService;
+    private final TelegramRoleCommandRegistrar telegramRoleCommandRegistrar;
     private final Map<Long, Long> searchStoryContext = new ConcurrentHashMap<>();
 
     // ADMIN / OWNER story icon upload state: private chat id -> selected story id
@@ -421,75 +426,57 @@ public class TelegramService {
             }
 
             // =====================================
-            // COMPLETE ACCESS CHECK
+            // PUBLIC STORY CATALOG
             //
-            // OWNER / ADMIN
-            // MANUAL FREE TRIAL
-            // MONTHLY
-            // YEARLY
-            // LIFETIME
-            // GLOBAL FREE TRIAL
+            // Everyone can browse story names even when subscription/story
+            // access is not active. Authorization is enforced only when the
+            // user actually requests episode audio.
             // =====================================
-
-            boolean active = subscriptionService.hasAccess(telegramUser);
 
             Integer userMessageId = message.getMessageId();
-
-            if (!active) {
-
-                // Never keep an old selected story after access ends.
-                // If a global trial is turned back ON later, the user
-                // must explicitly select a story again.
-                searchStoryContext.remove(chatId);
-
-                sendSubscriptionRequiredMessage(bot, chatId, userMessageId);
-
-                return;
-            }
-
-            // =====================================
-            // CUSTOM EPISODE SEARCH INPUT
-            //
-            // Supported formats after a story is selected:
-            //   10
-            //   10-15
-            //   10 to 15
-            //
-            // A single number is only treated as episode input while
-            // a story search context is active. This avoids stealing
-            // OWNER commands that may contain a Telegram numeric ID.
-            // =====================================
 
             boolean episodeSearchInput = text.matches("\\d+")
                     || text.matches("(?i)\\d+\\s*(?:-|to)\\s*\\d+");
 
+            // If a story is already selected, an episode request is always
+            // sent to the episode handler. That handler decides whether the
+            // user has subscription/reward + story permission.
             if (episodeSearchInput && searchStoryContext.containsKey(chatId)) {
-
                 handleEpisodeRangeSearch(bot, chatId, telegramUser, text);
-
                 return;
             }
 
+            String privateCommand = normalizeOwnerCommand(text);
+
             // =====================================
-            // USER-FACING STORY MENU ACTIONS
+            // ROLE-AWARE PANEL / START
             //
-            // These must work for USER, ADMIN and OWNER.
-            // In particular, OWNER can use the same story/search
-            // flow to verify forwarding and episode delivery.
+            // /start and /panel open the correct screen for the current role.
+            // The normal "Main Menu" reply button always opens the story menu.
             // =====================================
 
-            if (text.equalsIgnoreCase("🏠 Main Menu")) {
+            if ("/start".equals(privateCommand)
+                    || "/panel".equals(privateCommand)
+                    || "/ownerpanel".equals(privateCommand)
+                    || "/adminpanel".equals(privateCommand)) {
 
-                // OWNER returns to the management panel.
-                // USER / ADMIN keep the existing public story main menu.
+                searchStoryContext.remove(chatId);
+                storyIconUploadContext.remove(chatId);
+                telegramRoleCommandRegistrar.syncCommandsForUser(bot, telegramUser);
+
                 if (telegramUser.getRole() == UserRole.OWNER) {
-                    searchStoryContext.remove(chatId);
-                    storyIconUploadContext.remove(chatId);
                     sendOwnerPanel(bot, chatId);
+                } else if (telegramUser.getRole() == UserRole.ADMIN) {
+                    sendAdminPanel(bot, chatId);
                 } else {
                     showMainMenu(bot, chatId);
                 }
 
+                return;
+            }
+
+            if (text.equalsIgnoreCase("🏠 Main Menu")) {
+                showMainMenu(bot, chatId);
                 return;
             }
 
@@ -502,24 +489,55 @@ public class TelegramService {
                 searchStoryContext.remove(chatId);
                 sendMessage(bot, chatId, """
                         🎬 Hindi Stories
-                        
+
                         🚧 Coming Soon
                         """);
                 return;
             }
 
             if (text.equalsIgnoreCase("🔥 OnGoing Stories")) {
-                showOnGoingStories(bot, chatId, 0);
+                showOnGoingStories(bot, chatId, telegramUser, 0);
                 return;
             }
 
             if (text.equalsIgnoreCase("✅ Completed Stories")) {
-                showCompletedStories(bot, chatId, 0);
+                showCompletedStories(bot, chatId, telegramUser, 0);
                 return;
             }
 
-            if (text.equalsIgnoreCase("🆘 Help")) {
-                showHelpMenu(bot, chatId);
+            if (text.equalsIgnoreCase("🆘 Help") || "/help".equals(privateCommand)) {
+                if (telegramUser.getRole() == UserRole.OWNER) {
+                    sendOwnerUsageGuide(bot, chatId);
+                } else if (telegramUser.getRole() == UserRole.ADMIN) {
+                    sendAdminUsageGuide(bot, chatId);
+                } else {
+                    showHelpMenu(bot, chatId);
+                }
+                return;
+            }
+
+            if ("/usage".equals(privateCommand)) {
+                if (telegramUser.getRole() == UserRole.OWNER) {
+                    sendOwnerUsageGuide(bot, chatId);
+                } else if (telegramUser.getRole() == UserRole.ADMIN) {
+                    sendAdminUsageGuide(bot, chatId);
+                } else {
+                    showHelpMenu(bot, chatId);
+                }
+                return;
+            }
+
+            // =====================================
+            // COMPLETE ACCESS CHECK
+            //
+            // Non-browse actions still require an active access source.
+            // Episode requests are checked separately above.
+            // =====================================
+
+            boolean active = subscriptionService.hasAccess(telegramUser);
+
+            if (!active) {
+                sendSubscriptionRequiredMessage(bot, chatId, userMessageId);
                 return;
             }
 
@@ -539,7 +557,7 @@ public class TelegramService {
                 }
 
                 storyIconUploadContext.remove(chatId);
-                showAddStoryIconSelection(bot, chatId, 0);
+                showAddStoryIconSelection(bot, chatId, telegramUser, 0);
                 return;
             }
 
@@ -551,7 +569,27 @@ public class TelegramService {
                 }
 
                 storyIconUploadContext.remove(chatId);
-                showRemoveStoryIconSelection(bot, chatId, 0);
+                showRemoveStoryIconSelection(bot, chatId, telegramUser, 0);
+                return;
+            }
+
+            // =====================================
+            // STORY ACCESS MANAGEMENT - OWNER / ADMIN
+            //
+            // OWNER -> can manage ADMIN and USER mappings.
+            // ADMIN -> can manage USER mappings, but only for stories
+            //          assigned to that ADMIN by OWNER.
+            // =====================================
+
+            if (isStoryAccessCommand(text)) {
+
+                if (!isAdminOrOwner(telegramUser)) {
+                    sendMessage(bot, chatId, "❌ Admin access required.");
+                    return;
+                }
+
+                searchStoryContext.remove(chatId);
+                handleStoryAccessCommand(bot, chatId, telegramUser, text);
                 return;
             }
 
@@ -570,68 +608,6 @@ public class TelegramService {
 
                 return;
             }
-
-            // =========================
-            // START / MAIN MENU
-            // =========================
-
-            if (text.equalsIgnoreCase("/start") || text.equalsIgnoreCase("🏠 Main Menu")) {
-
-                showMainMenu(bot, chatId);
-
-                return;
-            }
-
-            // =====================================
-            // HELP COMMAND
-            // =====================================
-
-            if (text.equalsIgnoreCase("/help")) {
-
-                showHelpMenu(bot, chatId);
-
-                return;
-            }
-
-            if (text.equalsIgnoreCase("Tamil Stories")) {
-
-                showTamilMenu(bot, chatId);
-
-                return;
-            }
-
-            if (text.equalsIgnoreCase("Hindi Stories")) {
-
-                sendMessage(bot, chatId, """
-                        🎬 Hindi Stories
-                        
-                        🚧 Coming Soon
-                        """);
-
-                return;
-            }
-
-            if (text.equalsIgnoreCase("🔥 OnGoing Stories")) {
-
-                showOnGoingStories(bot, chatId, 0);
-
-                return;
-            }
-
-            if (text.equalsIgnoreCase("✅ Completed Stories")) {
-
-                showCompletedStories(bot, chatId, 0);
-
-                return;
-            }
-
-            if (text.equalsIgnoreCase("🆘 Help")) {
-
-                showHelpMenu(bot, chatId);
-
-                return;
-            }
-
 
             // Episode range input is handled above for USER, ADMIN and OWNER.
 
@@ -662,19 +638,20 @@ public class TelegramService {
 
             DateTimeFormatter displayFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy • hh:mm a");
 
-            if (user != null && rewardTrialService.hasActiveRewardTrial(user)) {
+            if (user != null && globalTrialService.hasGlobalTrialAccess(user)) {
+
+                trialInfo = globalTrialService.getUserTrialExpiry(user).map(expiry -> """
+                        
+                        🎁 Global Free Trial Active
+                        📚 ALL active stories are available
+                        ⏳ Valid Until: %s
+                        """.formatted(expiry.format(displayFormatter))).orElse("");
+
+            } else if (user != null && rewardTrialService.hasActiveRewardTrial(user)) {
 
                 trialInfo = rewardTrialService.getRewardExpiry(user).map(expiry -> """
                         
                         🎁 1 Hour Reward Access Active
-                        ⏳ Valid Until: %s
-                        """.formatted(expiry.format(displayFormatter))).orElse("");
-
-            } else if (user != null && !subscriptionService.hasActiveSubscription(user) && globalTrialService.hasGlobalTrialAccess(user)) {
-
-                trialInfo = globalTrialService.getUserTrialExpiry(user).map(expiry -> """
-                        
-                        🎁 Free Trial Active
                         ⏳ Valid Until: %s
                         """.formatted(expiry.format(displayFormatter))).orElse("");
             }
@@ -824,7 +801,7 @@ public class TelegramService {
         }
     }
 
-    private void showCompletedStories(TelegramLongPollingBot bot, Long chatId, int page) {
+    private void showCompletedStories(TelegramLongPollingBot bot, Long chatId, TelegramUser requestingUser, int page) {
 
         try {
 
@@ -832,7 +809,7 @@ public class TelegramService {
 
             int size = 10;
 
-            Page<Story> stories = storyService.getCompletedStories(page, size);
+            Page<Story> stories = storyAccessService.getCompletedStories(requestingUser, page, size);
 
             if (stories.isEmpty()) {
 
@@ -853,7 +830,7 @@ public class TelegramService {
         }
     }
 
-    private void showOnGoingStories(TelegramLongPollingBot bot, Long chatId, int page) {
+    private void showOnGoingStories(TelegramLongPollingBot bot, Long chatId, TelegramUser requestingUser, int page) {
 
         try {
 
@@ -861,7 +838,7 @@ public class TelegramService {
 
             int size = 10;
 
-            Page<Story> stories = storyService.getOnGoingStories(page, size);
+            Page<Story> stories = storyAccessService.getOnGoingStories(requestingUser, page, size);
 
             if (stories.isEmpty()) {
 
@@ -966,6 +943,132 @@ public class TelegramService {
     }
 
     // =========================================
+    // REWARD STORY SELECTION
+    //
+    // After the short-link reward is activated, show ALL active story names.
+    // The first story chosen is stored on RewardTrial.selectedStory and is the
+    // only story allowed for that 1-hour reward.
+    // =========================================
+
+    private void showRewardStorySelection(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user,
+            int page) {
+
+        try {
+            searchStoryContext.remove(chatId);
+
+            int size = 10;
+            Page<Story> stories = storyService.getActiveStories(page, size);
+
+            if (stories.isEmpty()) {
+                sendMessage(bot, chatId, "❌ No active stories available now.");
+                return;
+            }
+
+            Story selectedRewardStory = rewardTrialService
+                    .getSelectedRewardStory(user)
+                    .orElse(null);
+
+            boolean rewardActive = rewardTrialService.hasActiveRewardTrial(user);
+
+            StringBuilder builder = new StringBuilder();
+
+            if (rewardActive && selectedRewardStory == null) {
+                builder.append("🎁 CHOOSE ONE STORY FOR YOUR 1-HOUR REWARD\n\n");
+                builder.append("Select any story below.\n");
+                builder.append("The first story you choose will be available for this reward period.\n\n");
+            } else if (rewardActive) {
+                builder.append("🎁 YOUR 1-HOUR REWARD STORY\n\n");
+                builder.append("Selected: ")
+                        .append(selectedRewardStory != null ? selectedRewardStory.getTitle() : "-")
+                        .append("\n\n");
+                builder.append("You may browse all stories, but this reward can play episodes only from the selected story.\n");
+                builder.append("To change the reward story, the current reward must end and you must complete a NEW reward link.\n\n");
+            } else {
+                builder.append("📚 STORY LIBRARY\n\n");
+                builder.append("You can browse all active stories. Episode access is checked when you request audio.\n\n");
+            }
+
+            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+            int count = stories.getNumber() * stories.getSize() + 1;
+
+            for (Story story : stories) {
+                boolean selected = selectedRewardStory != null
+                        && selectedRewardStory.getId() != null
+                        && selectedRewardStory.getId().equals(story.getId());
+
+                String status = Boolean.TRUE.equals(story.getIsCompleted()) ? "✅" : "🔥";
+                String selectedMark = selected ? "🎁 " : "";
+
+                builder.append(String.format("%02d", count++))
+                        .append(" - ")
+                        .append(selectedMark)
+                        .append(story.getTitle())
+                        .append("\n");
+
+                InlineKeyboardButton button = new InlineKeyboardButton();
+                button.setText(selectedMark + status + " " + story.getTitle());
+                button.setCallbackData("story_" + story.getId());
+                rows.add(List.of(button));
+            }
+
+            List<InlineKeyboardButton> nav = new ArrayList<>();
+
+            if (stories.hasPrevious()) {
+                InlineKeyboardButton previous = new InlineKeyboardButton();
+                previous.setText("⬅️ Prev");
+                previous.setCallbackData("reward_stories_" + (stories.getNumber() - 1));
+                nav.add(previous);
+            }
+
+            InlineKeyboardButton pageButton = new InlineKeyboardButton();
+            pageButton.setText("📄 " + (stories.getNumber() + 1) + "/" + stories.getTotalPages());
+            pageButton.setCallbackData("ignore");
+            nav.add(pageButton);
+
+            if (stories.hasNext()) {
+                InlineKeyboardButton next = new InlineKeyboardButton();
+                next.setText("Next ➡️");
+                next.setCallbackData("reward_stories_" + (stories.getNumber() + 1));
+                nav.add(next);
+            }
+
+            rows.add(nav);
+
+            if (rewardActive && selectedRewardStory != null) {
+                InlineKeyboardButton changeStory = new InlineKeyboardButton();
+                changeStory.setText("🔄 Change Reward Story");
+                changeStory.setCallbackData("reward_change_story");
+                rows.add(List.of(changeStory));
+            }
+
+            InlineKeyboardButton home = new InlineKeyboardButton();
+            home.setText("🏠 Main Menu");
+            home.setCallbackData("main_menu");
+            rows.add(List.of(home));
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(rows);
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText(builder.toString());
+            message.setReplyMarkup(keyboard);
+            executeSendMessage(bot, chatId, message);
+
+        } catch (Exception e) {
+            log.error("showRewardStorySelection failed chatId={}", chatId, e);
+
+            try {
+                sendMessage(bot, chatId, "❌ Unable to load stories right now.");
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    // =========================================
     // CALLBACK QUERY HANDLER
     // =========================================
 
@@ -1006,98 +1109,233 @@ public class TelegramService {
                 return;
             }
 
+            if ("reward_change_story".equals(data)) {
+                handleRewardStoryChangeRequest(bot, chatId, user);
+                return;
+            }
+
+            if ("reward_change_confirm".equals(data)) {
+                handleRewardStoryChangeConfirm(bot, chatId, user);
+                return;
+            }
+
+            if ("reward_change_cancel".equals(data)) {
+                if (user != null && rewardTrialService.hasActiveRewardTrial(user)) {
+                    showRewardStorySelection(bot, chatId, user, 0);
+                } else {
+                    showMainMenu(bot, chatId);
+                }
+                return;
+            }
+
             // =====================================
-            // COMPLETE CALLBACK ACCESS CHECK
+            // PUBLIC CALLBACKS / STORY CATALOG
+            //
+            // Story names and story selection are browseable without an
+            // active subscription. Episode delivery is checked later when
+            // the user submits an episode/range.
             // =====================================
 
             if (user == null) {
-
                 sendSubscriptionRequiredMessage(bot, chatId, messageId);
-
                 return;
             }
 
-            boolean active = subscriptionService.hasAccess(user);
-
-            if (!active) {
-
-                searchStoryContext.remove(chatId);
-
-                sendSubscriptionRequiredMessage(bot, chatId, messageId);
-
-                return;
-            }
             if ("ignore".equals(data)) {
-
                 return;
             }
-
-            // =====================================
-            // LANGUAGE MENU
-            // =====================================
 
             if (data.equals("lang_tamil")) {
-
                 showTamilMenu(bot, chatId);
-
                 return;
             }
 
             if (data.equals("lang_hindi")) {
-
                 sendMessage(bot, chatId, """
                         🎬 Hindi Stories
-                        
+
                         🚧 Coming Soon
                         """);
-
                 return;
             }
-
-            // =====================================
-            // MAIN MENU
-            // =====================================
 
             if (data.equals("main_menu")) {
-
                 showMainMenu(bot, chatId);
-
                 return;
             }
 
-            // =====================================
-            // HELP
-            // =====================================
+            if (data.equals("role_panel")) {
+                telegramRoleCommandRegistrar.syncCommandsForUser(bot, user);
+
+                if (user.getRole() == UserRole.OWNER) {
+                    sendOwnerPanel(bot, chatId);
+                } else if (user.getRole() == UserRole.ADMIN) {
+                    sendAdminPanel(bot, chatId);
+                } else {
+                    showMainMenu(bot, chatId);
+                }
+                return;
+            }
 
             if (data.equals("help_menu")) {
-
                 showHelpMenu(bot, chatId);
-
                 return;
             }
-
-            // =====================================
-            // COMPLETED STORIES
-            // =====================================
 
             if (data.startsWith("completed_stories_")) {
-
                 int page = Integer.parseInt(data.replace("completed_stories_", ""));
+                showCompletedStories(bot, chatId, user, page);
+                return;
+            }
 
-                showCompletedStories(bot, chatId, page);
+            if (data.startsWith("ongoing_stories_")) {
+                int page = Integer.parseInt(data.replace("ongoing_stories_", ""));
+                showOnGoingStories(bot, chatId, user, page);
+                return;
+            }
 
+            if (data.startsWith("reward_stories_")) {
+                int page = Integer.parseInt(data.replace("reward_stories_", ""));
+                showRewardStorySelection(bot, chatId, user, page);
+                return;
+            }
+
+            if (data.startsWith("story_")) {
+                Long storyId = Long.parseLong(data.replace("story_", ""));
+                openEpisodeSearch(bot, chatId, user, storyId);
+                return;
+            }
+
+            if (data.startsWith("packs_") || data.startsWith("pack_")) {
+                String[] split = data.split("_");
+                Long storyId = Long.parseLong(split[1]);
+                openEpisodeSearch(bot, chatId, user, storyId);
+                return;
+            }
+
+            if (data.startsWith("search_")) {
+                Long storyId = Long.parseLong(data.replace("search_", ""));
+                openEpisodeSearch(bot, chatId, user, storyId);
+                return;
+            }
+
+            if (data.startsWith("episode_")) {
+                searchStoryContext.remove(chatId);
+                sendMessage(bot, chatId, """
+                        ℹ️ Episode list buttons are no longer used.
+
+                        Please select a story and enter a custom range
+                        such as 1-50.
+                        """);
+                showTamilMenu(bot, chatId);
                 return;
             }
 
             // =====================================
-            // ONGOING STORIES
+            // NON-BROWSE CALLBACK ACCESS CHECK
             // =====================================
 
-            if (data.startsWith("ongoing_stories_")) {
+            boolean active = subscriptionService.hasAccess(user);
 
-                int page = Integer.parseInt(data.replace("ongoing_stories_", ""));
+            if (!active) {
+                sendSubscriptionRequiredMessage(bot, chatId, messageId);
+                return;
+            }
 
-                showOnGoingStories(bot, chatId, page);
+            // =====================================
+            // STORY ACCESS MANAGEMENT - OWNER / ADMIN
+            // =====================================
+
+            if (data.startsWith("storyaccess_page_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                String payload = data.replace("storyaccess_page_", "");
+                String[] split = payload.split("_");
+
+                if (split.length < 2 || split.length > 3) {
+                    sendMessage(bot, chatId, "❌ Invalid story access page.");
+                    return;
+                }
+
+                Long targetTelegramId = Long.parseLong(split[0]);
+                int page = Integer.parseInt(split[1]);
+                Integer returnUsersPage = split.length == 3
+                        ? Integer.parseInt(split[2])
+                        : null;
+
+                showStoryAccessManagement(
+                        bot,
+                        chatId,
+                        user,
+                        targetTelegramId,
+                        page,
+                        returnUsersPage,
+                        messageId);
+
+                return;
+            }
+
+            if (data.startsWith("storyaccess_toggle_")) {
+
+                if (!isAdminOrOwner(user)) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                String payload = data.replace("storyaccess_toggle_", "");
+                String[] split = payload.split("_");
+
+                if (split.length < 3 || split.length > 4) {
+                    sendMessage(bot, chatId, "❌ Invalid story access action.");
+                    return;
+                }
+
+                Long targetTelegramId = Long.parseLong(split[0]);
+                Long storyId = Long.parseLong(split[1]);
+                int page = Integer.parseInt(split[2]);
+                Integer returnUsersPage = split.length == 4
+                        ? Integer.parseInt(split[3])
+                        : null;
+
+                TelegramUser targetUser = telegramUserService.getUserByTelegramId(targetTelegramId);
+                Story story = storyService.getStoryById(storyId);
+
+                if (targetUser == null || story == null) {
+                    sendMessage(bot, chatId, "❌ User or story not found.");
+                    return;
+                }
+
+                try {
+                    boolean enabled = storyAccessService.toggleStoryAccess(user, targetUser, story);
+
+                    String displayUser = targetUser.getUsername() == null || targetUser.getUsername().isBlank()
+                            ? String.valueOf(targetUser.getTelegramId())
+                            : "@" + targetUser.getUsername();
+
+                    sendMessage(
+                            bot,
+                            chatId,
+                            (enabled ? "✅ Granted: " : "❌ Revoked: ")
+                                    + story.getTitle()
+                                    + " → "
+                                    + displayUser);
+
+                    showStoryAccessManagement(
+                            bot,
+                            chatId,
+                            user,
+                            targetTelegramId,
+                            page,
+                            returnUsersPage,
+                            messageId);
+
+                } catch (SecurityException | IllegalArgumentException e) {
+                    sendMessage(bot, chatId, "❌ " + e.getMessage());
+                }
 
                 return;
             }
@@ -1172,17 +1410,62 @@ public class TelegramService {
                 }
 
                 UserRole newRole = approve ? UserRole.ADMIN : UserRole.USER;
-                telegramUserService.updateUserRole(targetUser, newRole);
+                targetUser = telegramUserService.updateUserRole(targetUser, newRole);
+                telegramRoleCommandRegistrar.syncCommandsForUser(bot, targetUser);
 
-                // Refresh the same management page immediately so the
-                // button changes from Approve <-> Disapprove.
-                showUsers(bot, chatId, sourcePage, messageId);
+                // Stay on the selected user's management screen so the
+                // role action is immediately reflected without losing context.
+                showUserDetailsScreen(
+                        bot,
+                        chatId,
+                        targetUser.getTelegramId(),
+                        sourcePage,
+                        messageId);
 
                 String displayUser = targetUser.getUsername() == null || targetUser.getUsername().isBlank()
                         ? String.valueOf(targetUser.getTelegramId())
                         : "@" + targetUser.getUsername();
 
-                sendMessage(bot, chatId, "✅ " + displayUser + " role changed to " + newRole + ".");
+                String roleMessage = "✅ " + displayUser + " role changed to " + newRole + ".";
+
+                if (newRole == UserRole.ADMIN) {
+                    roleMessage += "\n\n📚 ADMIN can access only OWNER-assigned stories.\nUse /storyaccess " + displayUser + " to assign them.";
+                }
+
+                sendMessage(bot, chatId, roleMessage);
+
+                return;
+            }
+
+            // =====================================
+            // USER MANAGEMENT DETAILS (OWNER)
+            // callback format: manageuser_<telegramId>_<usersPage>
+            // =====================================
+
+            if (data.startsWith("manageuser_")) {
+
+                if (user.getRole() != UserRole.OWNER) {
+                    showMainMenu(bot, chatId);
+                    return;
+                }
+
+                String payload = data.replace("manageuser_", "");
+                String[] split = payload.split("_");
+
+                if (split.length != 2) {
+                    sendMessage(bot, chatId, "❌ Invalid user selection.");
+                    return;
+                }
+
+                Long targetTelegramId = Long.parseLong(split[0]);
+                int sourcePage = Integer.parseInt(split[1]);
+
+                showUserDetailsScreen(
+                        bot,
+                        chatId,
+                        targetTelegramId,
+                        sourcePage,
+                        messageId);
 
                 return;
             }
@@ -1265,7 +1548,7 @@ public class TelegramService {
                 }
 
                 int page = Integer.parseInt(data.replace("addstoryicon_page_", ""));
-                showAddStoryIconSelection(bot, chatId, page);
+                showAddStoryIconSelection(bot, chatId, user, page);
                 return;
             }
 
@@ -1278,7 +1561,7 @@ public class TelegramService {
                 }
 
                 Long storyId = Long.parseLong(data.replace("addstoryicon_select_", ""));
-                prepareStoryIconUpload(bot, chatId, storyId);
+                prepareStoryIconUpload(bot, chatId, user, storyId);
                 return;
             }
 
@@ -1291,7 +1574,7 @@ public class TelegramService {
                 }
 
                 int page = Integer.parseInt(data.replace("removestoryicon_page_", ""));
-                showRemoveStoryIconSelection(bot, chatId, page);
+                showRemoveStoryIconSelection(bot, chatId, user, page);
                 return;
             }
 
@@ -1309,7 +1592,7 @@ public class TelegramService {
                 Long storyId = Long.parseLong(split[0]);
                 int page = split.length > 1 ? Integer.parseInt(split[1]) : 0;
 
-                showRemoveStoryIconConfirmation(bot, chatId, storyId, page);
+                showRemoveStoryIconConfirmation(bot, chatId, user, storyId, page);
                 return;
             }
 
@@ -1327,7 +1610,7 @@ public class TelegramService {
                 Long storyId = Long.parseLong(split[0]);
                 int page = split.length > 1 ? Integer.parseInt(split[1]) : 0;
 
-                removeStoryIcon(bot, chatId, storyId, page);
+                removeStoryIcon(bot, chatId, user, storyId, page);
                 return;
             }
 
@@ -1340,7 +1623,7 @@ public class TelegramService {
                 }
 
                 int page = Integer.parseInt(data.replace("removestoryicon_cancel_", ""));
-                showRemoveStoryIconSelection(bot, chatId, page);
+                showRemoveStoryIconSelection(bot, chatId, user, page);
                 return;
             }
 
@@ -1356,7 +1639,7 @@ public class TelegramService {
                 }
 
                 int page = Integer.parseInt(data.replace("storyicon_page_", ""));
-                showAddStoryIconSelection(bot, chatId, page);
+                showAddStoryIconSelection(bot, chatId, user, page);
                 return;
             }
 
@@ -1368,79 +1651,229 @@ public class TelegramService {
                 }
 
                 Long storyId = Long.parseLong(data.replace("storyicon_select_", ""));
-                prepareStoryIconUpload(bot, chatId, storyId);
+                prepareStoryIconUpload(bot, chatId, user, storyId);
                 return;
             }
 
-            // =====================================
-            // STORY OPEN -> DIRECT CUSTOM SEARCH
-            //
-            // No episode pack/list screen is shown.
-            // =====================================
-
-            if (data.startsWith("story_")) {
-
-                Long storyId = Long.parseLong(data.replace("story_", ""));
-
-                openEpisodeSearch(bot, chatId, user, storyId);
-
-                return;
-            }
-
-            // =====================================
-            // OLD PACK CALLBACK COMPATIBILITY
-            //
-            // Existing Telegram messages may still
-            // contain old pack buttons. Redirect them
-            // to the new custom search instead.
-            // =====================================
-
-            if (data.startsWith("packs_") || data.startsWith("pack_")) {
-
-                String[] split = data.split("_");
-
-                Long storyId = Long.parseLong(split[1]);
-
-                openEpisodeSearch(bot, chatId, user, storyId);
-
-                return;
-            }
-
-            // =====================================
-            // SEARCH AGAIN
-            // =====================================
-
-            if (data.startsWith("search_")) {
-
-                Long storyId = Long.parseLong(data.replace("search_", ""));
-
-                openEpisodeSearch(bot, chatId, user, storyId);
-
-                return;
-            }
-
-            // =====================================
-            // OLD SINGLE-EPISODE CALLBACK SUPPORT
-            // =====================================
-
-            if (data.startsWith("episode_")) {
-
-                searchStoryContext.remove(chatId);
-
-                sendMessage(bot, chatId, """
-                        ℹ️ Episode list buttons are no longer used.
-                        
-                        Please select a story and enter a custom range
-                        such as 1-50.
-                        """);
-
-                showTamilMenu(bot, chatId);
-
-            }
+            // Public story/open/search callbacks are intentionally handled
+            // before the non-browse access gate near the top of this method.
 
         } catch (Exception e) {
 
             log.error("handleCallbackQuery failed", e);
+        }
+    }
+
+    // =========================================
+    // REWARD STORY CHANGE
+    // =========================================
+
+    private void handleRewardStoryChangeRequest(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user) {
+
+        try {
+            searchStoryContext.remove(chatId);
+
+            if (user == null || !isNormalUser(user)) {
+                sendMessage(bot, chatId, "❌ Reward story change is available only for normal USER accounts.");
+                return;
+            }
+
+            // GLOBAL FREE TRIAL means every active story is already playable.
+            // Do not waste a new monetized reward link.
+            if (globalTrialService.hasGlobalTrialAccess(user)) {
+                sendMessage(bot, chatId, """
+                        🎁 Global Free Trial is active.
+
+                        ✅ You can use ALL active stories during the global trial.
+                        No new reward link is required to change stories.
+                        """);
+                showTamilMenu(bot, chatId);
+                return;
+            }
+
+            // If an individual/manual/paid subscription became active while an
+            // old reward row still exists, subscription access takes priority.
+            if (subscriptionService.hasActiveSubscription(user)) {
+                sendMessage(bot, chatId, """
+                        ✅ Your subscription/manual access is active.
+
+                        Reward-story replacement is not required.
+                        Your normal story permissions are now used.
+                        """);
+                showTamilMenu(bot, chatId);
+                return;
+            }
+
+            var activeReward = rewardTrialService.getActiveRewardTrial(user);
+
+            if (activeReward.isEmpty()) {
+                sendMessage(bot, chatId, """
+                        ℹ️ Your previous 1-hour reward is no longer active.
+
+                        Request a new reward link to choose another story.
+                        """);
+                handleRewardTrialRequest(bot, chatId, user);
+                return;
+            }
+
+            Story selectedStory = activeReward.get().getSelectedStory();
+
+            if (selectedStory == null) {
+                sendMessage(bot, chatId, """
+                        🎁 Your current reward does not have a story selected yet.
+
+                        Choose any story below. You do not need a new link.
+                        """);
+                showRewardStorySelection(bot, chatId, user, 0);
+                return;
+            }
+
+            String expiry = activeReward.get().getExpiresAt() == null
+                    ? "soon"
+                    : activeReward.get().getExpiresAt()
+                            .format(DateTimeFormatter.ofPattern("dd-MM-yyyy • hh:mm a"));
+
+            InlineKeyboardButton confirm = new InlineKeyboardButton();
+            confirm.setText("✅ Expire & Get New Link");
+            confirm.setCallbackData("reward_change_confirm");
+
+            InlineKeyboardButton cancel = new InlineKeyboardButton();
+            cancel.setText("❌ Keep Current Story");
+            cancel.setCallbackData("reward_change_cancel");
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(List.of(
+                    List.of(confirm),
+                    List.of(cancel)
+            ));
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("""
+                    🔄 CHANGE REWARD STORY
+
+                    Current Story:
+                    🎧 %s
+
+                    Current Reward Valid Until:
+                    ⏳ %s
+
+                    ⚠️ To choose a DIFFERENT story:
+                    1. Your current reward will be expired.
+                    2. A NEW ad/reward link will be created.
+                    3. Complete the new link successfully.
+                    4. A fresh 60-minute reward will activate.
+                    5. Then choose your new story.
+
+                    If the new link cannot be created, your current reward will remain active.
+                    """.formatted(selectedStory.getTitle(), expiry));
+            message.setReplyMarkup(keyboard);
+            executeSendMessage(bot, chatId, message);
+
+        } catch (Exception e) {
+            log.error("handleRewardStoryChangeRequest failed telegramId={}", user != null ? user.getTelegramId() : null, e);
+
+            try {
+                sendMessage(bot, chatId, "❌ Unable to start story change right now.");
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    private void handleRewardStoryChangeConfirm(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user) {
+
+        try {
+            searchStoryContext.remove(chatId);
+
+            if (user == null || !isNormalUser(user)) {
+                sendMessage(bot, chatId, "❌ Reward story change is available only for normal USER accounts.");
+                return;
+            }
+
+            if (!rewardTrialService.isEnabled()) {
+                sendMessage(bot, chatId, "❌ Reward links are currently unavailable. Your current reward was not changed.");
+                return;
+            }
+
+            // Re-check at confirmation time. A global trial/subscription could
+            // have become active after the confirmation screen was shown.
+            if (globalTrialService.hasGlobalTrialAccess(user)) {
+                sendMessage(bot, chatId, """
+                        🎁 Global Free Trial is active now.
+
+                        ✅ ALL active stories are available.
+                        Your reward does not need to be replaced.
+                        """);
+                showTamilMenu(bot, chatId);
+                return;
+            }
+
+            if (subscriptionService.hasActiveSubscription(user)) {
+                sendMessage(bot, chatId, """
+                        ✅ Your subscription/manual access is active now.
+
+                        No new reward link is required.
+                        """);
+                showTamilMenu(bot, chatId);
+                return;
+            }
+
+            RewardTrialService.RewardLinkResult result =
+                    rewardTrialService.createStoryChangeRewardLink(user);
+
+            InlineKeyboardButton openAds = new InlineKeyboardButton();
+            openAds.setText("▶️ Complete Ads & Unlock New Story");
+            openAds.setUrl(result.shortUrl());
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(List.of(List.of(openAds)));
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("""
+                    ✅ OLD REWARD ENDED
+
+                    A new reward link is ready.
+
+                    1. Complete the new ad-link steps.
+                    2. Return to this same Telegram account.
+                    3. A fresh 60-minute reward will activate.
+                    4. Then choose a different story.
+
+                    ⏳ New link expires in %d minutes.
+
+                    ⚠️ Until the new link is completed successfully,
+                    there is no active 1-hour reward access.
+                    """.formatted(RewardTrialService.REWARD_LINK_MINUTES));
+            message.setReplyMarkup(keyboard);
+            executeSendMessage(bot, chatId, message);
+
+        } catch (IllegalStateException e) {
+            log.warn("Reward story-change confirmation rejected telegramId={} reason={}",
+                    user != null ? user.getTelegramId() : null,
+                    e.getMessage());
+
+            try {
+                sendMessage(bot, chatId, "❌ " + e.getMessage());
+            } catch (Exception ignore) {
+            }
+        } catch (Exception e) {
+            log.error("handleRewardStoryChangeConfirm failed telegramId={}", user != null ? user.getTelegramId() : null, e);
+
+            try {
+                sendMessage(bot, chatId, """
+                        ❌ Unable to create the replacement reward link.
+
+                        Your current reward remains active if the replacement link was not created successfully.
+                        """);
+            } catch (Exception ignore) {
+            }
         }
     }
 
@@ -1460,8 +1893,10 @@ public class TelegramService {
 
             if (!isNormalUser(user)) {
                 sendMessage(bot, chatId, """
-                        ℹ️ OWNER / ADMIN accounts already have unrestricted access.
-                        Reward trial is only for normal users.
+                        ℹ️ Reward trial is only for normal USER accounts.
+
+                        OWNER uses all stories. ADMIN can listen only to stories
+                        assigned by OWNER.
                         """);
                 return;
             }
@@ -1483,6 +1918,8 @@ public class TelegramService {
                         
                         ⏳ Valid Until: %s
                         """.formatted(expiry));
+
+                showRewardStorySelection(bot, chatId, user, 0);
                 return;
             }
 
@@ -1550,7 +1987,7 @@ public class TelegramService {
             }
 
             if (!isNormalUser(user)) {
-                sendMessage(bot, chatId, "✅ OWNER / ADMIN access is already unrestricted.");
+                sendMessage(bot, chatId, "ℹ️ Reward trial is only for normal USER accounts. ADMIN story access is controlled by OWNER mappings.");
                 showMainMenu(bot, chatId);
                 return;
             }
@@ -1603,10 +2040,10 @@ public class TelegramService {
                     ✅ Reward verified through your one-time Telegram link.
                     ⏳ Valid until: %s
                     
-                    You can now choose a story and listen to episodes.
+                    Choose ONE story below for this reward period.
                     """.formatted(heading, expiry));
 
-            showMainMenu(bot, chatId);
+            showRewardStorySelection(bot, chatId, user, 0);
 
         } catch (Exception e) {
             log.error("handleDirectRewardClaim failed telegramId={}", user != null ? user.getTelegramId() : null, e);
@@ -1632,7 +2069,7 @@ public class TelegramService {
             }
 
             if (!isNormalUser(user)) {
-                sendMessage(bot, chatId, "✅ OWNER / ADMIN access is already unrestricted.");
+                sendMessage(bot, chatId, "ℹ️ Reward trial is only for normal USER accounts. ADMIN story access is controlled by OWNER mappings.");
                 showMainMenu(bot, chatId);
                 return;
             }
@@ -1671,10 +2108,10 @@ public class TelegramService {
                     ✅ Reward verified successfully.
                     ⏳ Valid until: %s
                     
-                    You can now choose a story and listen to episodes.
+                    Choose ONE story below for this reward period.
                     """.formatted(expiry));
 
-            showMainMenu(bot, chatId);
+            showRewardStorySelection(bot, chatId, user, 0);
 
         } catch (Exception e) {
             log.error("handleRewardSuccessReturn failed telegramId={}", user != null ? user.getTelegramId() : null, e);
@@ -1737,135 +2174,7 @@ public class TelegramService {
         }
 
         if ("/usage".equals(ownerCommand)) {
-
-            sendMessage(bot, chatId, """
-                    👑 OWNER USAGE GUIDE
-                    
-                    ━━━━━━━━━━━━━━
-                    🌍 GLOBAL FREE TRIAL
-                    ━━━━━━━━━━━━━━
-                    
-                    Enable:
-                    
-                    /trailonsubscription 2026-08-31
-                    
-                    Disable:
-                    
-                    /trailoffsubscription
-                    
-                    Global trial rules:
-                    
-                    • Maximum 7 days per user
-                    
-                    • Existing users start from
-                      global campaign start time
-                    
-                    • New users start from
-                      their joinedAt time
-                    
-                    • User trial never exceeds
-                      global campaign end date
-                    
-                    • Paid subscriptions continue
-                      independently
-                    
-                    • Manual user trials continue
-                      independently
-                    
-                    ━━━━━━━━━━━━━━
-                    👥 USERS
-                    ━━━━━━━━━━━━━━
-                    
-                    users
-                    
-                    show users
-                    
-                    get all users
-                    
-                    ━━━━━━━━━━━━━━
-                    👤 USER DETAILS
-                    ━━━━━━━━━━━━━━
-                    
-                    show user @username
-                    
-                    user 5999036520
-                    
-                    ━━━━━━━━━━━━━━
-                    🎭 ADMIN ROLE MANAGEMENT
-                    ━━━━━━━━━━━━━━
-                    
-                    Approve Admin:
-                    
-                    /approveAdmin @username
-                    
-                    
-                    DisApprove Admin:
-                    
-                    /disApproveAdmin @username
-                    
-                    ━━━━━━━━━━━━━━
-                    🎁 INDIVIDUAL FREE TRIAL
-                    ━━━━━━━━━━━━━━
-                    
-                    trial @username
-                    
-                    trial @username 15
-                    
-                    ━━━━━━━━━━━━━━
-                    💳 MONTHLY PLAN
-                    ━━━━━━━━━━━━━━
-                    
-                    activate @username monthly
-                    
-                    ━━━━━━━━━━━━━━
-                    📅 YEARLY PLAN
-                    ━━━━━━━━━━━━━━
-                    
-                    activate @username yearly
-                    
-                    ━━━━━━━━━━━━━━
-                    ♾️ LIFETIME PLAN
-                    ━━━━━━━━━━━━━━
-                    
-                    activate @username lifetime
-                    
-                    ━━━━━━━━━━━━━━
-                    ❌ EXPIRE USER
-                    ━━━━━━━━━━━━━━
-                    
-                    expire @username
-                    
-                    ━━━━━━━━━━━━━━
-                    📜 HISTORY
-                    ━━━━━━━━━━━━━━
-                    
-                    history @username
-                    
-                    show history @username
-                    
-                    history 5999036520
-                    
-                    ━━━━━━━━━━━━━━
-                    📚 STORIES
-                    ━━━━━━━━━━━━━━
-                    
-                    /stories
-                    
-                    /syncstories
-                    
-                    /deleteinactivestory
-
-                    /addstoryicon
-
-                    /removestoryicon
-
-                    ━━━━━━━━━━━━━━
-                    👑 OWNER PANEL
-                    ━━━━━━━━━━━━━━
-
-                    /panel
-                    """);
-
+            sendOwnerUsageGuide(bot, chatId);
             return;
         }
 
@@ -1898,8 +2207,17 @@ public class TelegramService {
 
             if (targetUser == null) {
                 sendUserDetailsHelp(bot, chatId);
+            } else if (targetUser.getRole() == UserRole.OWNER) {
+                sendMessage(bot, chatId, "ℹ️ OWNER has full access and is not managed through the user details screen.");
             } else {
-                showOwnerUserDetails(bot, chatId, targetUser);
+                // Use the SAME interactive USER DETAILS screen used by /users.
+                // Direct command starts with return page 0.
+                showUserDetailsScreen(
+                        bot,
+                        chatId,
+                        targetUser.getTelegramId(),
+                        0,
+                        null);
             }
 
             return;
@@ -1954,10 +2272,10 @@ public class TelegramService {
         //
         // Example:
         //
-        // /trailonsubscription 2026-08-31
+        // /trialonsubscription 2026-08-31
         // =====================================
 
-        if ("/trailonsubscription".equals(ownerCommand)) {
+        if ("/trialonsubscription".equals(ownerCommand) || "/trailonsubscription".equals(ownerCommand)) {
 
             // =====================================
             // OWNER ONLY
@@ -1990,7 +2308,7 @@ public class TelegramService {
                         
                         Usage:
                         
-                        /trailonsubscription 2026-08-31
+                        /trialonsubscription 2026-08-31
                         
                         📅 Date format:
                         
@@ -2053,7 +2371,7 @@ public class TelegramService {
                         
                         Correct example:
                         
-                        /trailonsubscription 2026-08-31
+                        /trialonsubscription 2026-08-31
                         """);
 
             } catch (IllegalArgumentException e) {
@@ -2072,7 +2390,7 @@ public class TelegramService {
         // GLOBAL FREE TRIAL OFF
         // =====================================
 
-        if ("/trailoffsubscription".equals(ownerCommand)) {
+        if ("/trialoffsubscription".equals(ownerCommand) || "/trailoffsubscription".equals(ownerCommand)) {
 
             if (!chatId.equals(telegramConfig.getOwnerId())) {
 
@@ -2125,6 +2443,25 @@ public class TelegramService {
         }
 
         // =====================================
+        // DIRECT INDIVIDUAL ACCESS COMMANDS
+        // =====================================
+
+        if ("/trial".equals(ownerCommand) || "/trail".equals(ownerCommand)) {
+            handleIndividualTrialCommand(bot, chatId, text);
+            return;
+        }
+
+        if ("/activate".equals(ownerCommand)) {
+            handlePaidPlanActivationCommand(bot, chatId, text);
+            return;
+        }
+
+        if ("/expire".equals(ownerCommand)) {
+            handleExpireUserCommand(bot, chatId, text);
+            return;
+        }
+
+        // =====================================
 // ADMIN APPROVE COMMAND
 //
 // Example:
@@ -2172,14 +2509,17 @@ public class TelegramService {
             }
 
 
-            telegramUserService.updateUserRole(
+            targetUser = telegramUserService.updateUserRole(
                     targetUser,
                     UserRole.ADMIN
             );
+            telegramRoleCommandRegistrar.syncCommandsForUser(bot, targetUser);
 
 
             sendMessage(bot, chatId, """
             ✅ ADMIN APPROVED
+
+            📚 Assign stories with /storyaccess @username
             
             👤 User:
             @%s
@@ -2246,10 +2586,11 @@ public class TelegramService {
 
 
 
-            telegramUserService.updateUserRole(
+            targetUser = telegramUserService.updateUserRole(
                     targetUser,
                     UserRole.USER
             );
+            telegramRoleCommandRegistrar.syncCommandsForUser(bot, targetUser);
 
 
             sendMessage(bot, chatId, """
@@ -2357,7 +2698,8 @@ public class TelegramService {
                     return;
                 }
 
-                telegramUserService.updateUserRole(targetUser, UserRole.USER);
+                targetUser = telegramUserService.updateUserRole(targetUser, UserRole.USER);
+                telegramRoleCommandRegistrar.syncCommandsForUser(bot, targetUser);
 
                 sendMessage(bot, chatId, """
                         ✅ ADMIN DISAPPROVED
@@ -2394,10 +2736,13 @@ public class TelegramService {
                     return;
                 }
 
-                telegramUserService.updateUserRole(targetUser, UserRole.ADMIN);
+                targetUser = telegramUserService.updateUserRole(targetUser, UserRole.ADMIN);
+                telegramRoleCommandRegistrar.syncCommandsForUser(bot, targetUser);
 
                 sendMessage(bot, chatId, """
                         ✅ ADMIN ROLE UPDATED
+
+                        📚 Assign stories with /storyaccess @username
                         
                         👤 User :
                         @%s
@@ -2409,148 +2754,18 @@ public class TelegramService {
                 return;
             }
 
-            // FREE TRIAL
-
-            // =====================================
-            // INDIVIDUAL FREE TRIAL
-            // =====================================
-
             if (wantsTrial) {
-
-                int trialDays = 7;
-
-                for (int i = 0; i < parts.length; i++) {
-
-                    String part = parts[i];
-
-                    if (!part.matches("\\d+")) {
-                        continue;
-                    }
-
-                    long numericValue;
-
-                    try {
-
-                        numericValue = Long.parseLong(part);
-
-                    } catch (NumberFormatException e) {
-
-                        continue;
-                    }
-
-                    // Telegram ID value - don't use as trial days
-                    if (targetUser.getTelegramId() != null && numericValue == targetUser.getTelegramId()) {
-
-                        continue;
-                    }
-
-                    // Remaining small numeric value can be trial days
-                    if (numericValue >= 1 && numericValue <= 365) {
-
-                        trialDays = (int) numericValue;
-
-                        break;
-                    }
-                }
-
-                if (trialDays <= 0 || trialDays > 365) {
-
-                    sendMessage(bot, chatId, """
-                            ❌ Invalid Trial Days
-                            
-                            Allowed range:
-                            
-                            1 - 365 days
-                            """);
-
-                    return;
-                }
-
-                subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.FREE, BillingType.MONTHLY, BigDecimal.ZERO, trialDays);
-
-                sendMessage(bot, chatId, """
-                        ✅ FREE TRIAL ACTIVATED
-                        
-                        👤 User:
-                        @%s
-                        
-                        🎁 Plan:
-                        FREE
-                        
-                        ⏳ Validity:
-                        %s Days
-                        """.formatted(targetUser.getUsername(), trialDays));
-
+                handleIndividualTrialCommand(bot, chatId, text);
                 return;
             }
 
-            // MONTHLY
-
-            if (containsOwnerKeyword(text, "monthly")) {
-
-                subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.MONTHLY, BillingType.MONTHLY, new BigDecimal("299"), 30);
-
-                sendMessage(bot, chatId, """
-                        ✅ MONTHLY PLAN ACTIVATED
-                        
-                        👤 User :
-                        @%s
-                        
-                        📅 Validity :
-                        30 Days
-                        """.formatted(targetUser.getUsername()));
-
+            if (wantsActivate) {
+                handlePaidPlanActivationCommand(bot, chatId, text);
                 return;
             }
-
-            // YEARLY
-
-            if (containsOwnerKeyword(text, "yearly")) {
-
-                subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.YEARLY, BillingType.YEARLY, new BigDecimal("1999"), 365);
-
-                sendMessage(bot, chatId, """
-                        ✅ YEARLY PLAN ACTIVATED
-                        
-                        👤 User :
-                        @%s
-                        
-                        📅 Validity :
-                        365 Days
-                        """.formatted(targetUser.getUsername()));
-
-                return;
-            }
-
-            // LIFETIME
-
-            if (containsOwnerKeyword(text, "lifetime")) {
-
-                subscriptionService.createOrUpdateSubscription(targetUser, SubscriptionPlan.LIFETIME, BillingType.LIFETIME, new BigDecimal("4999"), 36500);
-
-                sendMessage(bot, chatId, """
-                        ✅ LIFETIME PLAN ACTIVATED
-                        
-                        👤 User :
-                        @%s
-                        """.formatted(targetUser.getUsername()));
-
-                return;
-            }
-
-            // EXPIRE
 
             if (wantsExpire) {
-
-                subscriptionService.expireSubscription(targetUser);
-
-                sendMessage(bot, chatId, """
-                        ❌ SUBSCRIPTION EXPIRED
-                        
-                        👤 User :
-                        @%s
-                        """.formatted(targetUser.getUsername()));
-
+                handleExpireUserCommand(bot, chatId, text);
                 return;
             }
         }
@@ -2581,8 +2796,15 @@ public class TelegramService {
 
                 if (targetUser == null) {
                     sendUserDetailsHelp(bot, chatId);
+                } else if (targetUser.getRole() == UserRole.OWNER) {
+                    sendMessage(bot, chatId, "ℹ️ OWNER has full access and is not managed through the user details screen.");
                 } else {
-                    showOwnerUserDetails(bot, chatId, targetUser);
+                    showUserDetailsScreen(
+                            bot,
+                            chatId,
+                            targetUser.getTelegramId(),
+                            0,
+                            null);
                 }
             }
 
@@ -2605,7 +2827,7 @@ public class TelegramService {
                     Please provide campaign end date.
                     
                     Usage:
-                    /trailonsubscription 2026-08-31
+                    /trialonsubscription 2026-08-31
                     
                     Every eligible user receives maximum 7 days free access.
                     User access never exceeds the campaign end date.
@@ -2761,13 +2983,23 @@ public class TelegramService {
 
         sendMessage(bot, chatId, """
                 👤 USER DETAILS
-                
-                Usage:
+
+                Open one user's interactive details screen.
+
+                By username:
                 /userdetails @username
+
+                By Telegram ID:
                 /userdetails 5999036520
-                
-                You can also type:
-                show user @username
+
+                Example:
+                /userdetails @shiva_143_sk
+
+                The screen includes:
+                • Approve / Remove Admin
+                • Story Access
+                • Subscription / reward details
+                • Back to Users
                 """);
     }
 
@@ -2788,125 +3020,453 @@ public class TelegramService {
     private void sendUpdateUserHelp(TelegramLongPollingBot bot, Long chatId) throws Exception {
 
         sendMessage(bot, chatId, """
-            ⚙️ UPDATE USER
-            
-            Individual free trial:
-            trial @username
-            trial @username 15
-            
-            Paid plans:
-            activate @username monthly
-            activate @username yearly
-            activate @username lifetime
-            
-            Admin Role:
-            
-            /approveAdmin @username
-            
-            /disApproveAdmin @username
-            
-            Expire current access:
-            expire @username
-            """);
+                ⚙️ UPDATE USER SHORTCUTS
+
+                🎁 Free Trial
+                /trial @username
+                /trial @username 15
+
+                💳 Paid Plans
+                /activate @username monthly
+                /activate @username yearly
+                /activate @username lifetime
+
+                🎭 Admin Role
+                /approveadmin @username
+                /disapproveadmin @username
+
+                📚 Story Access
+                /storyaccess @username
+
+                ⛔ Expire Subscription
+                /expire @username
+
+                📜 History
+                /history @username
+                """);
+    }
+
+    private void handleIndividualTrialCommand(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            String text) throws Exception {
+
+        TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+        if (targetUser == null) {
+            sendMessage(bot, chatId, """
+                    🎁 INDIVIDUAL FREE TRIAL
+
+                    Default 7 days:
+                    /trial @username
+
+                    Custom days (1-365):
+                    /trial @username 15
+
+                    Telegram ID also works:
+                    /trial 6515281870 15
+
+                    Example output:
+                    ✅ FREE TRIAL ACTIVATED - 15 Days
+                    """);
+            return;
+        }
+
+        int trialDays = 7;
+        Integer explicitDays = null;
+
+        for (String token : text.trim().split("\\s+")) {
+            String candidate = token.replaceAll("^[,.:;]+|[,.:;]+$", "");
+
+            if (!candidate.matches("\\d+")) {
+                continue;
+            }
+
+            long numericValue;
+            try {
+                numericValue = Long.parseLong(candidate);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+
+            // When Telegram ID is used as the target, do not confuse it with days.
+            if (targetUser.getTelegramId() != null && numericValue == targetUser.getTelegramId()) {
+                continue;
+            }
+
+            explicitDays = numericValue > Integer.MAX_VALUE
+                    ? Integer.MAX_VALUE
+                    : (int) numericValue;
+            break;
+        }
+
+        if (explicitDays != null) {
+            trialDays = explicitDays;
+        }
+
+        if (trialDays < 1 || trialDays > 365) {
+            sendMessage(bot, chatId, """
+                    ❌ Trial days must be between 1 and 365.
+
+                    Examples:
+                    /trial @username
+                    /trial @username 15
+                    """);
+            return;
+        }
+
+        Subscription subscription = subscriptionService.createOrUpdateSubscription(
+                targetUser,
+                SubscriptionPlan.FREE,
+                BillingType.MONTHLY,
+                BigDecimal.ZERO,
+                trialDays);
+
+        sendMessage(bot, chatId, """
+                ✅ FREE TRIAL ACTIVATED
+
+                👤 User: %s
+                🎁 Plan: FREE TRIAL
+                ⏳ Validity: %d Days
+                📅 Start: %s
+                🏁 Valid Until: %s
+                """.formatted(
+                formatTargetUser(targetUser),
+                trialDays,
+                subscription.getStartDate(),
+                subscription.getExpiryDate()));
+    }
+
+    private void handlePaidPlanActivationCommand(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            String text) throws Exception {
+
+        TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+        if (targetUser == null) {
+            sendMessage(bot, chatId, """
+                    💳 ACTIVATE SUBSCRIPTION
+
+                    Monthly:
+                    /activate @username monthly
+
+                    Yearly:
+                    /activate @username yearly
+
+                    Lifetime:
+                    /activate @username lifetime
+
+                    Telegram ID also works:
+                    /activate 6515281870 monthly
+                    """);
+            return;
+        }
+
+        String normalized = text.toLowerCase();
+        SubscriptionPlan plan;
+        BillingType billingType;
+        BigDecimal amount;
+        int validityDays;
+
+        if (containsOwnerKeyword(normalized, "monthly")) {
+            plan = SubscriptionPlan.MONTHLY;
+            billingType = BillingType.MONTHLY;
+            amount = new BigDecimal("299");
+            validityDays = 30;
+        } else if (containsOwnerKeyword(normalized, "yearly")) {
+            plan = SubscriptionPlan.YEARLY;
+            billingType = BillingType.YEARLY;
+            amount = new BigDecimal("1999");
+            validityDays = 365;
+        } else if (containsOwnerKeyword(normalized, "lifetime")) {
+            plan = SubscriptionPlan.LIFETIME;
+            billingType = BillingType.LIFETIME;
+            amount = new BigDecimal("4999");
+            validityDays = 36500;
+        } else {
+            sendMessage(bot, chatId, """
+                    ❌ Plan is required.
+
+                    Examples:
+                    /activate @username monthly
+                    /activate @username yearly
+                    /activate @username lifetime
+                    """);
+            return;
+        }
+
+        Subscription subscription = subscriptionService.createOrUpdateSubscription(
+                targetUser,
+                plan,
+                billingType,
+                amount,
+                validityDays);
+
+        sendMessage(bot, chatId, """
+                ✅ SUBSCRIPTION ACTIVATED
+
+                👤 User: %s
+                📦 Plan: %s
+                💰 Amount: %s
+                📅 Start: %s
+                🏁 Valid Until: %s
+                """.formatted(
+                formatTargetUser(targetUser),
+                plan,
+                amount,
+                subscription.getStartDate(),
+                subscription.getExpiryDate()));
+    }
+
+    private void handleExpireUserCommand(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            String text) throws Exception {
+
+        TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+        if (targetUser == null) {
+            sendMessage(bot, chatId, """
+                    ⛔ EXPIRE USER ACCESS
+
+                    Usage:
+                    /expire @username
+                    /expire 6515281870
+
+                    Example output:
+                    ✅ Current subscription expired
+                    """);
+            return;
+        }
+
+        subscriptionService.expireSubscription(targetUser);
+
+        sendMessage(bot, chatId, """
+                ⛔ SUBSCRIPTION EXPIRED
+
+                👤 User: %s
+                ✅ Current subscription access has been expired.
+
+                ℹ️ Role-based ADMIN/OWNER access, active reward access,
+                or an active global free trial follow their own rules.
+                """.formatted(formatTargetUser(targetUser)));
+    }
+
+    private String formatTargetUser(TelegramUser user) {
+        if (user == null) {
+            return "-";
+        }
+
+        if (user.getUsername() != null && !user.getUsername().isBlank()) {
+            return "@" + user.getUsername();
+        }
+
+        return String.valueOf(user.getTelegramId());
+    }
+
+    private void sendOwnerUsageGuide(TelegramLongPollingBot bot, Long chatId) throws Exception {
+        sendMessage(bot, chatId, """
+                👑 OWNER COMMAND GUIDE
+
+                👥 USERS
+                /users
+                → Shows users, 50 per page.
+
+                /userdetails @username
+                → Shows role, access, plan and story count.
+                Example: /userdetails @john
+
+                /activeusers
+                → Users with current access.
+
+                /expiredusers
+                → Users without current access.
+
+                🎭 ADMIN ROLE
+                /approveadmin @username
+                → USER becomes ADMIN.
+                Example: /approveadmin @john
+                Output: ✅ ADMIN APPROVED
+
+                /disapproveadmin @username
+                → ADMIN becomes USER.
+                Example: /disapproveadmin @john
+                Output: ✅ ADMIN DISAPPROVED
+
+                /storyaccess @username
+                → Opens story grant/revoke screen.
+                OWNER can manage USER and ADMIN.
+
+                💳 USER ACCESS
+                /trial @username
+                → Gives default 7-day free trial.
+
+                /trial @username 15
+                → Gives 15-day free trial.
+
+                /activate @username monthly
+                → Activates MONTHLY plan for 30 days.
+
+                /activate @username yearly
+                → Activates YEARLY plan for 365 days.
+
+                /activate @username lifetime
+                → Activates LIFETIME plan.
+
+                /expire @username
+                → Expires current subscription rows.
+
+                /history @username
+                → Shows subscription history.
+
+                /updateuser
+                → Shows the short update command list.
+
+                🌍 GLOBAL FREE TRIAL
+                /trialonsubscription 2026-09-30
+                → Enables campaign; max 7 days per eligible user,
+                  never beyond campaign end date.
+
+                /trialoffsubscription
+                → Stops global free trial only.
+
+                📚 STORIES
+                /stories
+                → Owner story library.
+
+                /syncstories
+                → Syncs configured Telegram story channels.
+
+                /deleteinactivestory
+                → Deletes inactive stories after safety checks.
+
+                🖼 STORY ICONS
+                /addstoryicon
+                → Select story, then send a Telegram photo.
+
+                /removestoryicon
+                → Select story and remove its icon.
+
+                🏠 PANEL
+                /panel
+                → Opens OWNER PANEL.
+
+                ℹ️ Both @username and Telegram ID are accepted
+                where a user target is required.
+                """);
+    }
+
+    private void sendAdminUsageGuide(TelegramLongPollingBot bot, Long chatId) throws Exception {
+        sendMessage(bot, chatId, """
+                🛡️ ADMIN COMMAND GUIDE
+
+                📚 STORY ACCESS
+                /storyaccess @username
+                → Opens USER story grant/revoke screen.
+
+                Example:
+                /storyaccess @john
+
+                ADMIN rules:
+                • Can manage USER only.
+                • Can grant only stories OWNER assigned to this ADMIN.
+                • Cannot manage another ADMIN or OWNER.
+
+                🖼 STORY ICONS
+                /addstoryicon
+                → Shows only stories this ADMIN can manage.
+                Select one and send the image as a Telegram photo.
+
+                /removestoryicon
+                → Shows only manageable stories and removes an icon.
+
+                🏠 PANEL
+                /panel
+                → Opens ADMIN PANEL.
+
+                📖 STORY LISTENING
+                Send: Tamil Stories
+                → Opens public story catalog.
+                Episode access still follows the current access rules.
+
+                ℹ️ /users, /trial, /activate, /expire,
+                /approveadmin, global trial and story sync commands
+                are OWNER-only.
+                """);
+    }
+
+    private void sendAdminPanel(TelegramLongPollingBot bot, Long chatId) throws Exception {
+        sendMessage(bot, chatId, """
+                🛡️ ADMIN PANEL
+
+                📚 USER STORY ACCESS
+                /storyaccess @username
+                → Grant/revoke only from your OWNER-assigned stories.
+
+                🖼 STORY ICON MANAGEMENT
+                /addstoryicon
+                → Add/replace icon for your manageable stories.
+
+                /removestoryicon
+                → Remove icon from your manageable stories.
+
+                📖 STORY LISTENING
+                Tamil Stories
+                → Browse the story catalog.
+
+                ℹ️ HELP
+                /usage
+                → Examples + ADMIN permission rules.
+
+                🏠 PANEL
+                /panel
+                → Open this ADMIN PANEL anytime.
+                """);
     }
 
     private void sendOwnerPanel(TelegramLongPollingBot bot, Long chatId) throws Exception {
 
-        // Keep this panel command-driven so all existing owner handlers
-        // continue to work exactly as before. This is only the OWNER home UI.
         sendMessage(bot, chatId, """
                 👑 OWNER PANEL
 
-                👥 USER MANAGEMENT
-                /users
-                /userdetails @username
-                /activeusers
-                /expiredusers
+                👥 USERS
+                /users → 50 users/page
+                /userdetails @username → user details
+                /activeusers → current access users
+                /expiredusers → no-current-access users
 
-                🎭 ADMIN MANAGEMENT
-                /approveAdmin @username
-                /disApproveAdmin @username
+                🎭 ADMINS & STORY ACCESS
+                /approveadmin @username → make ADMIN
+                /disapproveadmin @username → make USER
+                /storyaccess @username → grant/revoke stories
 
-                💳 SUBSCRIPTION MANAGEMENT
-                /history @username
-                /updateuser
+                💳 INDIVIDUAL ACCESS
+                /trial @username → FREE 7 days
+                /trial @username 15 → FREE 15 days
+                /activate @username monthly → 30 days
+                /activate @username yearly → 365 days
+                /activate @username lifetime → lifetime
+                /expire @username → expire subscription
+                /history @username → subscription history
+                /updateuser → show shortcuts
 
                 🌍 GLOBAL FREE TRIAL
-                /trailonsubscription 2026-08-31
-                /trailoffsubscription
+                /trialonsubscription 2026-09-30 → enable
+                /trialoffsubscription → disable
 
-                📚 STORY MANAGEMENT
-                /stories
-                /syncstories
-                /deleteinactivestory
+                📚 STORIES
+                /stories → owner library
+                /syncstories → sync channels
+                /deleteinactivestory → delete inactive
 
-                🖼️ STORY ICON MANAGEMENT
-                /addstoryicon
-                /removestoryicon
+                🖼 STORY ICONS
+                /addstoryicon → add/replace
+                /removestoryicon → remove
 
-                ℹ️ HELP
-                /usage
-
-                🏠 PANEL
-                /panel
+                ℹ️ /usage → full examples + outputs
+                🏠 /panel → reopen OWNER PANEL
                 """);
-    }
-
-    private void showOwnerUserDetails(TelegramLongPollingBot bot, Long chatId, TelegramUser user) throws Exception {
-
-        if (user == null) {
-            sendUserDetailsHelp(bot, chatId);
-            return;
-        }
-
-        boolean subscriptionActive = subscriptionService.hasActiveSubscription(user);
-        boolean rewardTrialActive = !subscriptionActive && rewardTrialService.hasActiveRewardTrial(user);
-        boolean globalTrialActive = !subscriptionActive && !rewardTrialActive && globalTrialService.hasGlobalTrialAccess(user);
-
-        String accessSource;
-
-        if (user.getRole() == UserRole.OWNER || user.getRole() == UserRole.ADMIN) {
-            accessSource = "ROLE BYPASS";
-        } else if (subscriptionActive) {
-            accessSource = "SUBSCRIPTION";
-        } else if (rewardTrialActive) {
-            accessSource = "REWARD TRIAL (1 HOUR)";
-        } else if (globalTrialActive) {
-            accessSource = "GLOBAL TRIAL";
-        } else {
-            accessSource = "NO ACCESS";
-        }
-
-        List<Subscription> history = subscriptionService.getUserSubscriptionHistory(user);
-        Subscription latest = history.isEmpty() ? null : history.get(0);
-
-        String username = user.getUsername() == null || user.getUsername().isBlank() ? "No Username" : "@" + user.getUsername();
-
-        String latestPlan = latest == null ? "-" : String.valueOf(latest.getPlan());
-        String latestStatus = latest == null ? "-" : String.valueOf(latest.getStatus());
-        String latestStart = latest == null ? "-" : String.valueOf(latest.getStartDate());
-        String latestExpiry = latest == null ? "-" : String.valueOf(latest.getExpiryDate());
-        String rewardExpiry = rewardTrialService.getRewardExpiry(user).map(Object::toString).orElse("-");
-
-        sendMessage(bot, chatId, """
-                👤 USER DETAILS
-                
-                🆔 Telegram ID: %s
-                👤 Username: %s
-                📝 Name: %s %s
-                🎭 Role: %s
-                
-                🔐 Current Access: %s
-                
-                📦 Latest Plan: %s
-                📌 Latest Status: %s
-                📅 Start: %s
-                ⏳ Expiry: %s
-                🎁 Reward Expiry: %s
-                
-                🕒 Joined: %s
-                🕒 Last Active: %s
-                """.formatted(user.getTelegramId(), username, user.getFirstName() == null ? "" : user.getFirstName(), user.getLastName() == null ? "" : user.getLastName(), user.getRole(), accessSource, latestPlan, latestStatus, latestStart, latestExpiry, rewardExpiry, user.getJoinedAt(), user.getLastActiveAt()));
     }
 
     private void showUsersByAccessStatus(TelegramLongPollingBot bot, Long chatId, boolean activeAccess, int page, Integer messageId) {
@@ -3000,143 +3560,342 @@ public class TelegramService {
 
         try {
 
-            int size = 10;
+            int requestedPage = Math.max(page, 0);
 
-            Page<TelegramUser> users = telegramUserService.getUsers(page, size);
+            Page<TelegramUser> users =
+                    telegramUserService.getUsers(requestedPage, USERS_PAGE_SIZE);
+
+            // If a stale callback points to a page that no longer exists
+            // (for example after users are deleted), move to the last page.
+            if (users.getTotalPages() > 0 && requestedPage >= users.getTotalPages()) {
+                requestedPage = users.getTotalPages() - 1;
+                users = telegramUserService.getUsers(requestedPage, USERS_PAGE_SIZE);
+            }
+
+            int currentPage = users.getTotalPages() == 0 ? 0 : users.getNumber();
+            int totalPages = Math.max(users.getTotalPages(), 1);
+            long totalUsers = users.getTotalElements();
+
+            long from = totalUsers == 0
+                    ? 0
+                    : ((long) currentPage * USERS_PAGE_SIZE) + 1;
+            long to = totalUsers == 0
+                    ? 0
+                    : Math.min(from + users.getNumberOfElements() - 1L, totalUsers);
 
             StringBuilder builder = new StringBuilder();
 
-            builder.append("👑 USERS MANAGEMENT PANEL\n\n");
+            builder.append("👑 USERS MANAGEMENT\n\n");
+            builder.append("👥 Total Users: ").append(totalUsers).append("\n");
+            builder.append("📄 Page: ").append(currentPage + 1).append(" / ").append(totalPages).append("\n");
+            builder.append("📦 Showing: ").append(from).append(" - ").append(to).append("\n\n");
 
-            List<List<InlineKeyboardButton>> actionRows = new ArrayList<>();
+            if (users.isEmpty()) {
+                builder.append("No users found.");
+            } else {
+                builder.append("Select a user to manage 👇");
+            }
 
-            users.forEach(user -> {
+            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
 
-                builder.append("🆔 ").append(user.getTelegramId()).append("\n");
+            int serialNumber = currentPage * USERS_PAGE_SIZE + 1;
 
-                builder.append("👤 ");
+            for (TelegramUser listedUser : users.getContent()) {
 
-                if (user.getUsername() != null) {
+                InlineKeyboardButton userButton = new InlineKeyboardButton();
 
-                    builder.append("@").append(user.getUsername());
+                String roleIcon = listedUser.getRole() == UserRole.ADMIN
+                        ? "🛡️"
+                        : "👤";
 
-                } else {
+                userButton.setText(
+                        serialNumber++
+                                + ". "
+                                + roleIcon
+                                + " "
+                                + getUserManagementDisplayName(listedUser)
+                                + " · "
+                                + listedUser.getRole());
 
-                    builder.append("No Username");
-                }
+                userButton.setCallbackData(
+                        "manageuser_"
+                                + listedUser.getTelegramId()
+                                + "_"
+                                + currentPage);
 
-                builder.append("\n");
+                // One user per row keeps usernames readable on mobile.
+                rows.add(List.of(userButton));
+            }
 
-                builder.append("🎭 Role : ").append(user.getRole()).append("\n");
+            List<InlineKeyboardButton> navigation = new ArrayList<>();
 
-                builder.append("🕒 Last Active : ").append(user.getLastActiveAt()).append("\n");
-
-                builder.append("━━━━━━━━━━━━━━\n");
-
-                String displayUser = user.getUsername() == null || user.getUsername().isBlank()
-                        ? String.valueOf(user.getTelegramId())
-                        : "@" + user.getUsername();
-
-                InlineKeyboardButton roleButton = new InlineKeyboardButton();
-
-                if (user.getRole() == UserRole.ADMIN) {
-                    roleButton.setText("❌ Disapprove Admin · " + displayUser);
-                    roleButton.setCallbackData("admin_disapprove_" + user.getTelegramId() + "_" + page);
-                } else {
-                    roleButton.setText("✅ Approve Admin · " + displayUser);
-                    roleButton.setCallbackData("admin_approve_" + user.getTelegramId() + "_" + page);
-                }
-
-                actionRows.add(List.of(roleButton));
-            });
-
-            builder.append("\n");
-
-            builder.append("📄 Page ").append(page + 1).append(" / ").append(users.getTotalPages());
-
-            // =====================================
-            // INLINE BUTTONS
-            // =====================================
-
-            List<InlineKeyboardButton> row = new ArrayList<>();
-
-            if (page > 0) {
-
+            if (users.hasPrevious()) {
                 InlineKeyboardButton previous = new InlineKeyboardButton();
-
                 previous.setText("⬅️ Previous");
-
-                previous.setCallbackData("users_" + (page - 1));
-
-                row.add(previous);
+                previous.setCallbackData("users_" + (currentPage - 1));
+                navigation.add(previous);
             }
 
             InlineKeyboardButton indicator = new InlineKeyboardButton();
-
-            indicator.setText((page + 1) + "/" + users.getTotalPages());
-
+            indicator.setText((currentPage + 1) + "/" + totalPages);
             indicator.setCallbackData("ignore");
-
-            row.add(indicator);
+            navigation.add(indicator);
 
             if (users.hasNext()) {
-
                 InlineKeyboardButton next = new InlineKeyboardButton();
-
                 next.setText("Next ➡️");
-
-                next.setCallbackData("users_" + (page + 1));
-
-                row.add(next);
+                next.setCallbackData("users_" + (currentPage + 1));
+                navigation.add(next);
             }
+
+            rows.add(navigation);
+
+            InlineKeyboardButton refresh = new InlineKeyboardButton();
+            refresh.setText("🔄 Refresh");
+            refresh.setCallbackData("users_" + currentPage);
+            rows.add(List.of(refresh));
 
             InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
-
-            if (!row.isEmpty()) {
-                actionRows.add(row);
-            }
-
-            keyboard.setKeyboard(actionRows);
-
-            // =====================================
-            // EDIT
-            // =====================================
+            keyboard.setKeyboard(rows);
 
             if (messageId != null) {
 
                 EditMessageText edit = new EditMessageText();
-
                 edit.setChatId(String.valueOf(chatId));
-
                 edit.setMessageId(messageId);
-
                 edit.setText(builder.toString());
-
                 edit.setReplyMarkup(keyboard);
-
                 bot.execute(edit);
-
                 return;
             }
 
-            // =====================================
-            // NEW MESSAGE
-            // =====================================
-
             SendMessage sendMessage = new SendMessage();
-
             sendMessage.setChatId(String.valueOf(chatId));
-
             sendMessage.setText(builder.toString());
-
             sendMessage.setReplyMarkup(keyboard);
-
             executeSendMessage(bot, chatId, sendMessage);
 
         } catch (Exception e) {
-
-            log.error("showUsers failed", e);
+            log.error("showUsers failed page={}", page, e);
         }
+    }
+
+    // =========================================
+    // SHOW SELECTED USER DETAILS (OWNER)
+    // =========================================
+
+    private void showUserDetailsScreen(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            Long targetTelegramId,
+            int sourcePage,
+            Integer messageId) {
+
+        try {
+
+            int safeSourcePage = Math.max(sourcePage, 0);
+
+            TelegramUser targetUser =
+                    telegramUserService.getUserByTelegramId(targetTelegramId);
+
+            if (targetUser == null) {
+                sendMessage(bot, chatId, "❌ User not found.");
+                showUsers(bot, chatId, safeSourcePage, messageId);
+                return;
+            }
+
+            if (targetUser.getRole() == UserRole.OWNER) {
+                sendMessage(bot, chatId, "❌ OWNER account cannot be managed from the users list.");
+                showUsers(bot, chatId, safeSourcePage, messageId);
+                return;
+            }
+
+            boolean subscriptionActive = subscriptionService.hasActiveSubscription(targetUser);
+            boolean rewardTrialActive = rewardTrialService.hasActiveRewardTrial(targetUser);
+            boolean globalTrialActive = globalTrialService.hasGlobalTrialAccess(targetUser);
+
+            String accessSource;
+
+            // GLOBAL TRIAL has the highest temporary access priority for ADMIN/USER.
+            if (globalTrialActive) {
+                accessSource = "GLOBAL TRIAL";
+            } else if (targetUser.getRole() == UserRole.ADMIN) {
+                accessSource = "ADMIN + OWNER STORY MAPPING";
+            } else if (subscriptionActive) {
+                accessSource = "SUBSCRIPTION";
+            } else if (rewardTrialActive) {
+                accessSource = "REWARD TRIAL (1 HOUR)";
+            } else {
+                accessSource = "NO ACCESS";
+            }
+
+            long assignedStoryCount =
+                    storyAccessService.getAssignedStoryCount(targetUser);
+
+            String lastActive = targetUser.getLastActiveAt() == null
+                    ? "-"
+                    : targetUser.getLastActiveAt().format(USER_MANAGEMENT_DATE_TIME_FORMAT);
+
+            String joinedAt = targetUser.getJoinedAt() == null
+                    ? "-"
+                    : targetUser.getJoinedAt().format(USER_MANAGEMENT_DATE_TIME_FORMAT);
+
+            String fullName = ((targetUser.getFirstName() == null ? "" : targetUser.getFirstName())
+                    + " "
+                    + (targetUser.getLastName() == null ? "" : targetUser.getLastName())).trim();
+
+            if (fullName.isBlank()) {
+                fullName = "-";
+            }
+
+            // Keep subscription information on the SAME screen instead of having
+            // a separate read-only /userdetails output.
+            List<Subscription> subscriptionHistory =
+                    subscriptionService.getUserSubscriptionHistory(targetUser);
+            Subscription latestSubscription =
+                    subscriptionHistory.isEmpty() ? null : subscriptionHistory.get(0);
+
+            String latestPlan = latestSubscription == null
+                    ? "-"
+                    : String.valueOf(latestSubscription.getPlan());
+            String latestStatus = latestSubscription == null
+                    ? "-"
+                    : String.valueOf(latestSubscription.getStatus());
+            String latestStart = latestSubscription == null
+                    ? "-"
+                    : String.valueOf(latestSubscription.getStartDate());
+            String latestExpiry = latestSubscription == null
+                    ? "-"
+                    : String.valueOf(latestSubscription.getExpiryDate());
+            String rewardExpiry = rewardTrialService
+                    .getRewardExpiry(targetUser)
+                    .map(value -> value.format(USER_MANAGEMENT_DATE_TIME_FORMAT))
+                    .orElse("-");
+
+            String text = """
+                    👤 USER DETAILS
+
+                    👤 User: %s
+                    🆔 Telegram ID: %s
+                    📝 Name: %s
+                    🎭 Role: %s
+
+                    🔐 Current Access: %s
+                    📚 Assigned Stories: %d
+
+                    📦 Latest Plan: %s
+                    📌 Latest Status: %s
+                    📅 Start: %s
+                    ⏳ Expiry: %s
+                    🎁 Reward Expiry: %s
+
+                    🕒 Joined: %s
+                    🕒 Last Active: %s
+
+                    Choose an action 👇
+                    """.formatted(
+                    getUserManagementDisplayName(targetUser),
+                    targetUser.getTelegramId(),
+                    fullName,
+                    targetUser.getRole(),
+                    accessSource,
+                    assignedStoryCount,
+                    latestPlan,
+                    latestStatus,
+                    latestStart,
+                    latestExpiry,
+                    rewardExpiry,
+                    joinedAt,
+                    lastActive);
+
+            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+            InlineKeyboardButton roleButton = new InlineKeyboardButton();
+
+            if (targetUser.getRole() == UserRole.ADMIN) {
+                roleButton.setText("👤 Remove Admin Role");
+                roleButton.setCallbackData(
+                        "admin_disapprove_"
+                                + targetUser.getTelegramId()
+                                + "_"
+                                + safeSourcePage);
+            } else {
+                roleButton.setText("🛡️ Approve as Admin");
+                roleButton.setCallbackData(
+                        "admin_approve_"
+                                + targetUser.getTelegramId()
+                                + "_"
+                                + safeSourcePage);
+            }
+
+            rows.add(List.of(roleButton));
+
+            InlineKeyboardButton storyAccess = new InlineKeyboardButton();
+            storyAccess.setText("📚 Story Access (" + assignedStoryCount + ")");
+            storyAccess.setCallbackData(
+                    "storyaccess_page_"
+                            + targetUser.getTelegramId()
+                            + "_0_"
+                            + safeSourcePage);
+            rows.add(List.of(storyAccess));
+
+            InlineKeyboardButton back = new InlineKeyboardButton();
+            back.setText("⬅️ Back to Users");
+            back.setCallbackData("users_" + safeSourcePage);
+            rows.add(List.of(back));
+
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+            keyboard.setKeyboard(rows);
+
+            if (messageId != null) {
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(messageId);
+                edit.setText(text);
+                edit.setReplyMarkup(keyboard);
+                bot.execute(edit);
+                return;
+            }
+
+            SendMessage sendMessage = new SendMessage();
+            sendMessage.setChatId(String.valueOf(chatId));
+            sendMessage.setText(text);
+            sendMessage.setReplyMarkup(keyboard);
+            executeSendMessage(bot, chatId, sendMessage);
+
+        } catch (Exception e) {
+            log.error(
+                    "showUserDetailsScreen failed targetTelegramId={} sourcePage={}",
+                    targetTelegramId,
+                    sourcePage,
+                    e);
+            try {
+                sendMessage(bot, chatId, "❌ Unable to load user details. Please try /users again.");
+            } catch (Exception ignored) {
+                // Original failure is already logged above.
+            }
+        }
+    }
+
+    private String getUserManagementDisplayName(TelegramUser user) {
+
+        if (user == null) {
+            return "Unknown User";
+        }
+
+        if (user.getUsername() != null && !user.getUsername().isBlank()) {
+            return "@" + user.getUsername();
+        }
+
+        String fullName = ((user.getFirstName() == null ? "" : user.getFirstName())
+                + " "
+                + (user.getLastName() == null ? "" : user.getLastName())).trim();
+
+        if (!fullName.isBlank()) {
+            return fullName;
+        }
+
+        return String.valueOf(user.getTelegramId());
     }
 
     // =========================================
@@ -3465,6 +4224,22 @@ public class TelegramService {
                 return;
             }
 
+            // Reward users may browse every story. The FIRST playable story
+            // they select during the active reward becomes the one reward-scoped
+            // story. Selecting another story later does not replace it.
+            boolean rewardOnlyAccess = isNormalUser(requestingUser)
+                    && !subscriptionService.hasActiveSubscription(requestingUser)
+                    && !globalTrialService.hasGlobalTrialAccess(requestingUser)
+                    && rewardTrialService.hasActiveRewardTrial(requestingUser);
+
+            RewardTrialService.RewardStorySelection rewardSelection = null;
+
+            if (rewardOnlyAccess) {
+                rewardSelection = rewardTrialService.selectStoryForActiveReward(
+                        requestingUser,
+                        story);
+            }
+
             searchStoryContext.put(chatId, storyId);
 
             EpisodeLimitPolicy limitPolicy = getEpisodeLimitPolicy(requestingUser);
@@ -3494,6 +4269,19 @@ public class TelegramService {
                         """;
             }
 
+            String rewardSelectionInfo = "";
+
+            if (rewardSelection != null) {
+                if (rewardSelection.selectedNow()) {
+                    rewardSelectionInfo = "\n\n🎁 This story is now selected for your current 1-hour reward.";
+                } else if (!rewardSelection.selectedStoryMatches()
+                        && rewardSelection.selectedStory() != null) {
+                    rewardSelectionInfo = "\n\n🎁 Current reward story: "
+                            + rewardSelection.selectedStory().getTitle()
+                            + "\nYou can browse this story, but episodes here require a NEW reward link to change the reward story.";
+                }
+            }
+
             String storyDetailsText = """
                     🎧 %s
                     
@@ -3509,8 +4297,13 @@ public class TelegramService {
                     10 to 15
                     
                     ⚠️ Maximum %d episodes per search.
-                    🎵 Audio files will be sent directly.%s
-                    """.formatted(story.getTitle(), latestEpisode, limitPolicy.getPerSearch(), usageInfo);
+                    🎵 Audio files will be sent directly.%s%s
+                    """.formatted(
+                    story.getTitle(),
+                    latestEpisode,
+                    limitPolicy.getPerSearch(),
+                    usageInfo,
+                    rewardSelectionInfo);
 
             // Only the presentation changes here. Episode/search/access logic above stays untouched.
             sendStoryDetailsWithIcon(bot, chatId, story, storyDetailsText);
@@ -3637,6 +4430,40 @@ public class TelegramService {
                 return;
             }
 
+            // Story names are public, but audio requests require BOTH:
+            // 1) an active access source, and
+            // 2) permission for this exact story.
+            if (!subscriptionService.hasAccess(requestingUser)) {
+                sendSubscriptionRequiredMessage(bot, chatId, null);
+                return;
+            }
+
+            if (!storyAccessService.hasEpisodeAccess(requestingUser, story)) {
+
+                searchStoryContext.remove(chatId);
+
+                String selectedRewardStory = rewardTrialService
+                        .getSelectedRewardStory(requestingUser)
+                        .map(Story::getTitle)
+                        .orElse("");
+
+                if (!selectedRewardStory.isBlank()
+                        && rewardTrialService.hasActiveRewardTrial(requestingUser)) {
+                    sendRewardStoryMismatchMessage(bot, chatId, requestingUser);
+                } else {
+                    sendMessage(bot, chatId, """
+                            🔒 You don't have access to this story.
+
+                            You can browse all story names, but episode access
+                            is available only for stories assigned to you.
+
+                            Please contact Admin / Owner for story access.
+                            """);
+                }
+
+                return;
+            }
+
             boolean owner = requestingUser != null && requestingUser.getRole() == UserRole.OWNER;
 
             if (!owner && !Boolean.TRUE.equals(story.getActive())) {
@@ -3701,6 +4528,276 @@ public class TelegramService {
         }
     }
 
+    private void sendRewardStoryMismatchMessage(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser user) throws Exception {
+
+        Story selectedStory = rewardTrialService
+                .getSelectedRewardStory(user)
+                .orElse(null);
+
+        if (selectedStory == null) {
+            sendMessage(bot, chatId, """
+                    🔒 This story is not available for the current reward.
+
+                    Please choose your reward story first.
+                    """);
+            return;
+        }
+
+        InlineKeyboardButton continueStory = new InlineKeyboardButton();
+        continueStory.setText("🎧 Continue " + selectedStory.getTitle());
+        continueStory.setCallbackData("story_" + selectedStory.getId());
+
+        InlineKeyboardButton changeStory = new InlineKeyboardButton();
+        changeStory.setText("🔄 Change Story - New Reward Link");
+        changeStory.setCallbackData("reward_change_story");
+
+        InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+        keyboard.setKeyboard(List.of(
+                List.of(continueStory),
+                List.of(changeStory)
+        ));
+
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText("""
+                🔒 This story is not part of your current 1-hour reward.
+
+                🎁 Current Reward Story:
+                %s
+
+                You can browse every story name.
+
+                To listen to a DIFFERENT story, the current reward must end
+                and you must complete a NEW reward link successfully.
+                """.formatted(selectedStory.getTitle()));
+        message.setReplyMarkup(keyboard);
+        executeSendMessage(bot, chatId, message);
+    }
+
+    // =========================================
+    // STORY ACCESS MANAGEMENT
+    // OWNER -> ADMIN/USER
+    // ADMIN -> USER only, within ADMIN assigned stories
+    // =========================================
+
+    private boolean isStoryAccessCommand(String text) {
+
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+
+        return "/storyaccess".equals(normalizeOwnerCommand(text));
+    }
+
+    private void handleStoryAccessCommand(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser actor,
+            String text) throws Exception {
+
+        TelegramUser targetUser = resolveOwnerTargetUser(text);
+
+        if (targetUser == null) {
+            sendMessage(bot, chatId, """
+                    📚 STORY ACCESS MANAGEMENT
+
+                    Usage:
+                    /storyaccess @username
+                    /storyaccess 5999036520
+
+                    OWNER:
+                    • Can assign/revoke stories for ADMIN and USER.
+
+                    ADMIN:
+                    • Can assign/revoke stories for USER only.
+                    • Can assign only stories given to the ADMIN by OWNER.
+                    """);
+            return;
+        }
+
+        showStoryAccessManagement(
+                bot,
+                chatId,
+                actor,
+                targetUser.getTelegramId(),
+                0,
+                null,
+                null);
+    }
+
+    private void showStoryAccessManagement(
+            TelegramLongPollingBot bot,
+            Long chatId,
+            TelegramUser actor,
+            Long targetTelegramId,
+            int page,
+            Integer returnUsersPage,
+            Integer messageId) throws Exception {
+
+        if (!isAdminOrOwner(actor)) {
+            sendMessage(bot, chatId, "❌ Admin access required.");
+            return;
+        }
+
+        TelegramUser targetUser = telegramUserService.getUserByTelegramId(targetTelegramId);
+
+        if (targetUser == null) {
+            sendMessage(bot, chatId, "❌ User not found.");
+            return;
+        }
+
+        if (targetUser.getRole() == UserRole.OWNER) {
+            sendMessage(bot, chatId, "❌ OWNER has automatic access to all stories and cannot be mapped.");
+            return;
+        }
+
+        if (actor.getRole() == UserRole.ADMIN && targetUser.getRole() != UserRole.USER) {
+            sendMessage(bot, chatId, "❌ ADMIN can manage story access only for USER accounts.");
+            return;
+        }
+
+        int size = 10;
+        Page<Story> stories = storyAccessService.getAssignableStories(actor, page, size);
+
+        String targetName = targetUser.getUsername() == null || targetUser.getUsername().isBlank()
+                ? String.valueOf(targetUser.getTelegramId())
+                : "@" + targetUser.getUsername();
+
+        if (stories.isEmpty()) {
+
+            String noStoriesMessage = actor.getRole() == UserRole.ADMIN
+                    ? "❌ No stories are assigned to your ADMIN account. Ask OWNER to assign stories first."
+                    : "❌ No active stories are available for assignment.";
+
+            sendMessage(bot, chatId, noStoriesMessage);
+            return;
+        }
+
+        StringBuilder builder = new StringBuilder();
+
+        builder.append("📚 STORY ACCESS\n\n");
+        builder.append("👤 Target: " ).append(targetName).append("\n");
+        builder.append("🎭 Role: " ).append(targetUser.getRole()).append("\n");
+        builder.append("✅ Assigned Stories: " )
+                .append(storyAccessService.getAssignedStoryCount(targetUser))
+                .append("\n\n");
+
+        if (targetUser.getRole() == UserRole.ADMIN) {
+            builder.append("ℹ️ ADMIN access is valid only for OWNER-granted stories.\n\n");
+        }
+
+        builder.append("Tap a story to grant/revoke access.\n");
+
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        for (Story story : stories) {
+
+            boolean assigned = storyAccessService.hasAssignedStoryAccess(targetUser, story);
+
+            InlineKeyboardButton button = new InlineKeyboardButton();
+            button.setText((assigned ? "✅ " : "➕ ") + story.getTitle());
+            String toggleCallback =
+                    "storyaccess_toggle_"
+                            + targetUser.getTelegramId()
+                            + "_"
+                            + story.getId()
+                            + "_"
+                            + stories.getNumber();
+
+            if (returnUsersPage != null) {
+                toggleCallback += "_" + returnUsersPage;
+            }
+
+            button.setCallbackData(toggleCallback);
+
+            rows.add(List.of(button));
+        }
+
+        List<InlineKeyboardButton> nav = new ArrayList<>();
+
+        if (stories.hasPrevious()) {
+            InlineKeyboardButton previous = new InlineKeyboardButton();
+            previous.setText("⬅️ Prev");
+            String previousCallback =
+                    "storyaccess_page_"
+                            + targetUser.getTelegramId()
+                            + "_"
+                            + (stories.getNumber() - 1);
+
+            if (returnUsersPage != null) {
+                previousCallback += "_" + returnUsersPage;
+            }
+
+            previous.setCallbackData(previousCallback);
+            nav.add(previous);
+        }
+
+        InlineKeyboardButton pageButton = new InlineKeyboardButton();
+        pageButton.setText("📄 " + (stories.getNumber() + 1) + "/" + stories.getTotalPages());
+        pageButton.setCallbackData("ignore");
+        nav.add(pageButton);
+
+        if (stories.hasNext()) {
+            InlineKeyboardButton next = new InlineKeyboardButton();
+            next.setText("Next ➡️");
+            String nextCallback =
+                    "storyaccess_page_"
+                            + targetUser.getTelegramId()
+                            + "_"
+                            + (stories.getNumber() + 1);
+
+            if (returnUsersPage != null) {
+                nextCallback += "_" + returnUsersPage;
+            }
+
+            next.setCallbackData(nextCallback);
+            nav.add(next);
+        }
+
+        rows.add(nav);
+
+        InlineKeyboardButton back = new InlineKeyboardButton();
+        if (actor.getRole() == UserRole.OWNER) {
+            if (returnUsersPage != null) {
+                back.setText("⬅️ User Details");
+                back.setCallbackData(
+                        "manageuser_"
+                                + targetUser.getTelegramId()
+                                + "_"
+                                + returnUsersPage);
+            } else {
+                back.setText("⬅️ Users");
+                back.setCallbackData("users_0");
+            }
+        } else {
+            back.setText("⬅️ Admin Panel");
+            back.setCallbackData("role_panel");
+        }
+        rows.add(List.of(back));
+
+        InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+        keyboard.setKeyboard(rows);
+
+        if (messageId != null) {
+            EditMessageText edit = new EditMessageText();
+            edit.setChatId(String.valueOf(chatId));
+            edit.setMessageId(messageId);
+            edit.setText(builder.toString());
+            edit.setReplyMarkup(keyboard);
+            bot.execute(edit);
+            return;
+        }
+
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText(builder.toString());
+        message.setReplyMarkup(keyboard);
+        executeSendMessage(bot, chatId, message);
+    }
+
     // =========================================
     // STORY ICON MANAGEMENT
     // ADMIN / OWNER ONLY
@@ -3747,12 +4844,12 @@ public class TelegramService {
     // ADD / REPLACE STORY ICON - STORY LIST
     // =========================================
 
-    private void showAddStoryIconSelection(TelegramLongPollingBot bot, Long chatId, int page) throws Exception {
+    private void showAddStoryIconSelection(TelegramLongPollingBot bot, Long chatId, TelegramUser actor, int page) throws Exception {
 
         try {
 
             int size = 10;
-            Page<Story> stories = storyService.getStories(page, size);
+            Page<Story> stories = storyAccessService.getManageableStories(actor, page, size);
 
             if (stories.isEmpty()) {
                 sendMessage(bot, chatId, "❌ No stories available.");
@@ -3799,6 +4896,11 @@ public class TelegramService {
 
             rows.add(nav);
 
+            InlineKeyboardButton backToPanel = new InlineKeyboardButton();
+            backToPanel.setText(actor.getRole() == UserRole.OWNER ? "⬅️ Owner Panel" : "⬅️ Admin Panel");
+            backToPanel.setCallbackData("role_panel");
+            rows.add(List.of(backToPanel));
+
             InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
             keyboard.setKeyboard(rows);
 
@@ -3829,6 +4931,7 @@ public class TelegramService {
     private void prepareStoryIconUpload(
             TelegramLongPollingBot bot,
             Long chatId,
+            TelegramUser actor,
             Long storyId) throws Exception {
 
         Story story = storyService.getStoryById(storyId);
@@ -3836,6 +4939,12 @@ public class TelegramService {
         if (story == null) {
             storyIconUploadContext.remove(chatId);
             sendMessage(bot, chatId, "❌ Story not found.");
+            return;
+        }
+
+        if (!storyAccessService.hasStoryAccess(actor, story)) {
+            storyIconUploadContext.remove(chatId);
+            sendMessage(bot, chatId, "❌ You do not have access to manage this story.");
             return;
         }
 
@@ -3890,6 +4999,12 @@ public class TelegramService {
                 return;
             }
 
+            if (!storyAccessService.hasStoryAccess(telegramUser, story)) {
+                storyIconUploadContext.remove(chatId);
+                sendMessage(bot, chatId, "❌ You no longer have access to manage this story.");
+                return;
+            }
+
             if (!message.hasPhoto() || message.getPhoto() == null || message.getPhoto().isEmpty()) {
                 sendMessage(bot, chatId, "❌ Please send the image as a Telegram photo.");
                 return;
@@ -3921,12 +5036,12 @@ public class TelegramService {
     // REMOVE STORY ICON - STORY LIST
     // =========================================
 
-    private void showRemoveStoryIconSelection(TelegramLongPollingBot bot, Long chatId, int page) throws Exception {
+    private void showRemoveStoryIconSelection(TelegramLongPollingBot bot, Long chatId, TelegramUser actor, int page) throws Exception {
 
         try {
 
             int size = 10;
-            Page<Story> stories = storyService.getStories(page, size);
+            Page<Story> stories = storyAccessService.getManageableStories(actor, page, size);
 
             if (stories.isEmpty()) {
                 sendMessage(bot, chatId, "❌ No stories available.");
@@ -3974,6 +5089,11 @@ public class TelegramService {
 
             rows.add(nav);
 
+            InlineKeyboardButton backToPanel = new InlineKeyboardButton();
+            backToPanel.setText(actor.getRole() == UserRole.OWNER ? "⬅️ Owner Panel" : "⬅️ Admin Panel");
+            backToPanel.setCallbackData("role_panel");
+            rows.add(List.of(backToPanel));
+
             InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
             keyboard.setKeyboard(rows);
 
@@ -4004,6 +5124,7 @@ public class TelegramService {
     private void showRemoveStoryIconConfirmation(
             TelegramLongPollingBot bot,
             Long chatId,
+            TelegramUser actor,
             Long storyId,
             int page) throws Exception {
 
@@ -4011,6 +5132,11 @@ public class TelegramService {
 
         if (story == null) {
             sendMessage(bot, chatId, "❌ Story not found.");
+            return;
+        }
+
+        if (!storyAccessService.hasStoryAccess(actor, story)) {
+            sendMessage(bot, chatId, "❌ You do not have access to manage this story.");
             return;
         }
 
@@ -4058,6 +5184,7 @@ public class TelegramService {
     private void removeStoryIcon(
             TelegramLongPollingBot bot,
             Long chatId,
+            TelegramUser actor,
             Long storyId,
             int page) throws Exception {
 
@@ -4067,6 +5194,11 @@ public class TelegramService {
 
             if (story == null) {
                 sendMessage(bot, chatId, "❌ Story not found.");
+                return;
+            }
+
+            if (!storyAccessService.hasStoryAccess(actor, story)) {
+                sendMessage(bot, chatId, "❌ You do not have access to manage this story.");
                 return;
             }
 
@@ -4091,7 +5223,7 @@ public class TelegramService {
                     """.formatted(story.getTitle()));
 
             // Stay in the remove flow so multiple icons can be managed.
-            showRemoveStoryIconSelection(bot, chatId, Math.max(page, 0));
+            showRemoveStoryIconSelection(bot, chatId, actor, Math.max(page, 0));
 
         } catch (Exception e) {
             log.error("removeStoryIcon failed storyId={}", storyId, e);
@@ -4363,6 +5495,23 @@ public class TelegramService {
                             
                             Your free trial/subscription is no longer active.
                             
+                            Remaining episodes were not sent.
+                            """);
+
+                    return;
+                }
+
+                if (!storyAccessService.hasEpisodeAccess(requestingUser, story)) {
+
+                    log.info("Episode batch stopped because story access ended telegramId={} storyId={} sentCount={}", requestingUser != null ? requestingUser.getTelegramId() : null, story.getId(), sentCount);
+
+                    searchStoryContext.remove(chatId);
+
+                    sendMessage(bot, chatId, """
+                            🔒 Story Access Ended
+
+                            You no longer have episode access to this story.
+
                             Remaining episodes were not sent.
                             """);
 

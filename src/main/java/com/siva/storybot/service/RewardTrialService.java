@@ -2,6 +2,7 @@ package com.siva.storybot.service;
 
 import com.siva.storybot.config.TelegramConfig;
 import com.siva.storybot.entity.RewardTrial;
+import com.siva.storybot.entity.Story;
 import com.siva.storybot.entity.TelegramUser;
 import com.siva.storybot.enums.RewardLinkProviderType;
 import com.siva.storybot.enums.RewardTrialStatus;
@@ -148,22 +149,134 @@ public class RewardTrialService {
             );
         }
 
-        // -----------------------------------------------------
-        // Provider-first + key-first-within-provider rotation.
-        //
-        // Example with 2 keys each:
-        // LITESHORT[key1] -> LITESHORT[key2] ->
-        // SHRTFLY[key1]   -> SHRTFLY[key2]   -> repeat.
-        //
-        // Resolver owns the complete rotation + provider failover.
-        // -----------------------------------------------------
+        // No reusable pending row: create a brand-new one.
+        return createFreshRewardLink(user, now).result();
+    }
 
-        RewardLinkProviderType initialProviderType =
-                providerResolver.getDefaultProviderType();
+    /**
+     * User explicitly wants to switch the story attached to the current
+     * 1-hour reward.
+     *
+     * Flow:
+     * 1) Current ACTIVE reward must exist and already have a selected story.
+     * 2) Create a brand-new PENDING short link first.
+     * 3) Only after the new short link is successfully persisted, expire the
+     *    old ACTIVE reward and invalidate every older PENDING link.
+     * 4) The new reward row starts with selectedStory=null.
+     * 5) User must complete the new short-link flow; successful Telegram claim
+     *    activates a fresh 60-minute reward and the next selected story becomes
+     *    the new reward story.
+     *
+     * If provider/link generation fails, the transaction rolls back and the
+     * existing ACTIVE reward stays usable.
+     */
+    @Transactional
+    public synchronized RewardLinkResult createStoryChangeRewardLink(TelegramUser user) {
 
-        // -----------------------------------------------------
-        // Generate token + pending DB row
-        // -----------------------------------------------------
+        validateLinkCreationFeature();
+
+        if (user == null) {
+            throw new IllegalArgumentException("Telegram user is required");
+        }
+
+        if (user.getRole() != UserRole.USER) {
+            throw new IllegalStateException("Reward trial is available only for normal users");
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+
+        List<RewardTrial> activeRows = rewardTrialRepository
+                .findAllByTelegramUserAndStatusForUpdate(user, RewardTrialStatus.ACTIVE);
+
+        RewardTrial currentActive = null;
+
+        for (RewardTrial row : activeRows) {
+            boolean stillActive = row.getExpiresAt() != null && now.isBefore(row.getExpiresAt());
+
+            if (stillActive && currentActive == null) {
+                currentActive = row;
+            }
+        }
+
+        if (currentActive == null) {
+            // Idempotency / double-click safety: if the first confirmation
+            // already ended the old reward and created a replacement PENDING
+            // link, return that same valid link instead of creating duplicates.
+            List<RewardTrial> pendingRows = rewardTrialRepository
+                    .findAllByTelegramUserAndStatusForUpdate(user, RewardTrialStatus.PENDING);
+
+            for (RewardTrial pending : pendingRows) {
+                boolean valid = pending.getLinkExpiresAt() != null
+                        && now.isBefore(pending.getLinkExpiresAt())
+                        && pending.getShortUrl() != null
+                        && !pending.getShortUrl().isBlank();
+
+                if (valid) {
+                    return new RewardLinkResult(pending.getShortUrl(), pending.getLinkExpiresAt());
+                }
+            }
+
+            // The old reward may have expired naturally while the confirmation
+            // dialog was open. In that case simply issue a normal fresh link.
+            return createFreshRewardLink(user, now).result();
+        }
+
+        if (currentActive.getSelectedStory() == null) {
+            throw new IllegalStateException("No story is locked yet. Choose a story from the current reward instead.");
+        }
+
+        // Create replacement first. Provider/API failure must not destroy the
+        // user's current reward. The transaction will roll back on failure.
+        CreatedRewardLink replacement = createFreshRewardLink(user, now);
+
+        LocalDateTime changedAt = LocalDateTime.now();
+
+        // New link exists: now the old reward is intentionally ended.
+        for (RewardTrial row : activeRows) {
+            row.setStatus(RewardTrialStatus.EXPIRED);
+            row.setUpdatedAt(changedAt);
+        }
+
+        if (!activeRows.isEmpty()) {
+            rewardTrialRepository.saveAll(activeRows);
+        }
+
+        // Keep only the replacement PENDING row. Any previous pending token
+        // must never be able to activate after a story-change request.
+        List<RewardTrial> pendingRows = rewardTrialRepository
+                .findAllByTelegramUserAndStatusForUpdate(user, RewardTrialStatus.PENDING);
+
+        for (RewardTrial pending : pendingRows) {
+            if (Objects.equals(pending.getId(), replacement.rewardTrial().getId())) {
+                continue;
+            }
+
+            pending.setStatus(RewardTrialStatus.EXPIRED);
+            pending.setUpdatedAt(changedAt);
+        }
+
+        rewardTrialRepository.saveAll(pendingRows);
+
+        log.info(
+                "Reward story-change link created telegramId={} oldRewardTrialId={} oldStoryId={} newRewardTrialId={} linkExpiresAt={}",
+                user.getTelegramId(),
+                currentActive.getId(),
+                currentActive.getSelectedStory() != null ? currentActive.getSelectedStory().getId() : null,
+                replacement.rewardTrial().getId(),
+                replacement.result().linkExpiresAt()
+        );
+
+        return replacement.result();
+    }
+
+    /**
+     * Creates one fresh PENDING reward row and one external short URL.
+     * No ACTIVE-reward check is performed here; callers decide whether they are
+     * creating a normal reward or replacing an existing reward.
+     */
+    private CreatedRewardLink createFreshRewardLink(TelegramUser user, LocalDateTime now) {
+
+        RewardLinkProviderType initialProviderType = providerResolver.getDefaultProviderType();
 
         String token = newToken();
         LocalDateTime linkExpiresAt = now.plusMinutes(REWARD_LINK_MINUTES);
@@ -187,7 +300,6 @@ public class RewardTrialService {
         try {
             result = providerResolver.shortenWithFailover(telegramDestination);
         } catch (RuntimeException ex) {
-            // Only provider/API failures reach this branch.
             rewardTrial.setStatus(RewardTrialStatus.FAILED);
             rewardTrial.setUpdatedAt(LocalDateTime.now());
             rewardTrialRepository.save(rewardTrial);
@@ -202,14 +314,9 @@ public class RewardTrialService {
             throw ex;
         }
 
-        // The provider API succeeded. Persist the actual provider and URL.
-        // IMPORTANT: keep this DB save OUTSIDE the provider-failure catch.
-        // If DB persistence fails, we must not call another provider and create
-        // another external short URL for the same reward token.
         rewardTrial.setProvider(result.providerType().getDatabaseValue());
         rewardTrial.setShortUrl(result.shortUrl());
         rewardTrial.setUpdatedAt(LocalDateTime.now());
-
         rewardTrialRepository.save(rewardTrial);
 
         log.info(
@@ -222,10 +329,8 @@ public class RewardTrialService {
                 linkExpiresAt
         );
 
-        return new RewardLinkResult(
-                result.shortUrl(),
-                linkExpiresAt
-        );
+        RewardLinkResult rewardLinkResult = new RewardLinkResult(result.shortUrl(), linkExpiresAt);
+        return new CreatedRewardLink(rewardTrial, rewardLinkResult);
     }
 
     @Transactional
@@ -243,7 +348,7 @@ public class RewardTrialService {
 
         if (claimant.getRole() != UserRole.USER) {
 
-            return new ActivationResult(false, false, "OWNER / ADMIN accounts already have unrestricted access.", null);
+            return new ActivationResult(false, false, "OWNER / ADMIN accounts do not require reward-trial access.", null);
         }
 
         String token = tokenFromStartPayload(startPayload);
@@ -459,6 +564,82 @@ public class RewardTrialService {
         return getActiveRewardTrial(user).isPresent();
     }
 
+    /**
+     * Bind the first story selected during the currently active reward.
+     * This is reward-scoped access only; it does not create a permanent
+     * UserStoryAccess mapping.
+     */
+    @Transactional
+    public RewardStorySelection selectStoryForActiveReward(TelegramUser user, Story story) {
+
+        if (user == null || story == null || user.getRole() != UserRole.USER) {
+            return new RewardStorySelection(false, false, false, null);
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        List<RewardTrial> activeRows = rewardTrialRepository
+                .findAllByTelegramUserAndStatusForUpdate(user, RewardTrialStatus.ACTIVE);
+
+        RewardTrial active = null;
+
+        for (RewardTrial row : activeRows) {
+            if (row.getExpiresAt() == null || !now.isBefore(row.getExpiresAt())) {
+                row.setStatus(RewardTrialStatus.EXPIRED);
+                row.setUpdatedAt(now);
+                rewardTrialRepository.save(row);
+                continue;
+            }
+
+            if (active == null) {
+                active = row;
+            } else {
+                row.setStatus(RewardTrialStatus.EXPIRED);
+                row.setUpdatedAt(now);
+                rewardTrialRepository.save(row);
+            }
+        }
+
+        if (active == null) {
+            return new RewardStorySelection(false, false, false, null);
+        }
+
+        Story selected = active.getSelectedStory();
+
+        if (selected == null) {
+            active.setSelectedStory(story);
+            active.setUpdatedAt(now);
+            rewardTrialRepository.save(active);
+
+            log.info(
+                    "Reward story selected telegramId={} rewardTrialId={} storyId={}",
+                    user.getTelegramId(), active.getId(), story.getId());
+
+            return new RewardStorySelection(true, true, true, story);
+        }
+
+        boolean sameStory = Objects.equals(selected.getId(), story.getId());
+        return new RewardStorySelection(true, false, sameStory, selected);
+    }
+
+    public boolean hasSelectedStoryAccess(TelegramUser user, Story story) {
+
+        if (user == null || story == null) {
+            return false;
+        }
+
+        return getActiveRewardTrial(user)
+                .map(RewardTrial::getSelectedStory)
+                .filter(Objects::nonNull)
+                .map(selected -> Objects.equals(selected.getId(), story.getId()))
+                .orElse(false);
+    }
+
+    public Optional<Story> getSelectedRewardStory(TelegramUser user) {
+        return getActiveRewardTrial(user)
+                .map(RewardTrial::getSelectedStory)
+                .filter(Objects::nonNull);
+    }
+
     // =========================================================
     // ACTIVE REWARD
     // =========================================================
@@ -606,7 +787,17 @@ public class RewardTrialService {
     public record RewardLinkResult(String shortUrl, LocalDateTime linkExpiresAt) {
     }
 
+    private record CreatedRewardLink(RewardTrial rewardTrial, RewardLinkResult result) {
+    }
+
     public record ActivationResult(boolean success, boolean alreadyActive, String message,
                                    LocalDateTime accessExpiresAt) {
+    }
+
+    public record RewardStorySelection(
+            boolean rewardActive,
+            boolean selectedNow,
+            boolean selectedStoryMatches,
+            Story selectedStory) {
     }
 }
