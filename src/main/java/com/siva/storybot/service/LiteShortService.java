@@ -8,14 +8,15 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.core.annotation.Order;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.net.URI;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Service
+@Order(10)
 @RequiredArgsConstructor
 public class LiteShortService implements RewardLinkProvider {
 
@@ -27,13 +28,6 @@ public class LiteShortService implements RewardLinkProvider {
     // =========================================================
     // LITESHORT CONFIGURATION
     // =========================================================
-    /**
-     * Thread-safe in-memory round-robin counter.
-     * <p>
-     * Application restart will start rotation again
-     * from API key slot 1.
-     */
-    private final AtomicInteger nextApiKeyIndex = new AtomicInteger(0);
     @Value("${reward.trial.liteshort.api-url:https://liteshort.com/api/}")
     private String apiUrl;
     /**
@@ -44,16 +38,10 @@ public class LiteShortService implements RewardLinkProvider {
      * reward.trial.liteshort.api-keys=
      * ${LITESHORT_API_KEYS:key1,key2,key3}
      * <p>
-     * Rotation:
-     * <p>
-     * Link 1 -> key1
-     * Link 2 -> key2
-     * Link 3 -> key3
-     * Link 4 -> key1
-     * <p>
-     * Existing valid pending reward links may be reused by
-     * RewardTrialService. In that case LiteShort API is not
-     * called and the round-robin position does not move.
+     * RewardLinkProviderResolver owns rotation. For this provider it will
+     * explicitly request key index 0, then 1, then 2 before moving to the
+     * next provider. Existing valid pending links are reused without calling
+     * any short-link provider.
      */
     @Value("${reward.trial.liteshort.api-keys:}")
     private String apiKeys;
@@ -175,13 +163,14 @@ public class LiteShortService implements RewardLinkProvider {
     // SHORT URL EXTRACTION
     // =========================================================
 
+    @Override
     public int getConfiguredApiKeyCount() {
 
         return getConfiguredApiKeys().size();
     }
 
     @Override
-    public String shorten(String destinationUrl) {
+    public String shorten(String destinationUrl, int apiKeyIndex) {
 
         // -----------------------------------------------------
         // Destination validation
@@ -219,10 +208,10 @@ public class LiteShortService implements RewardLinkProvider {
         }
 
         // -----------------------------------------------------
-        // Select next API key using round robin
+        // Select the exact API key requested by the central resolver
         // -----------------------------------------------------
 
-        ApiKeySelection keySelection = selectApiKey(configuredKeys);
+        ApiKeySelection keySelection = selectApiKey(configuredKeys, apiKeyIndex);
 
         // -----------------------------------------------------
         // API endpoint
@@ -373,29 +362,24 @@ public class LiteShortService implements RewardLinkProvider {
     // COMMON HELPERS
     // =========================================================
 
-    private ApiKeySelection selectApiKey(List<String> configuredKeys) {
+    private ApiKeySelection selectApiKey(List<String> configuredKeys, int apiKeyIndex) {
 
         int total = configuredKeys.size();
 
         if (total <= 0) {
-
             throw new IllegalStateException("No LiteShort API keys are configured");
         }
 
-        /*
-         * Thread-safe sequence:
-         *
-         * 0 -> key1
-         * 1 -> key2
-         * 2 -> key3
-         * 3 -> key1
-         * 4 -> key2
-         */
-        int sequence = nextApiKeyIndex.getAndIncrement();
+        if (apiKeyIndex < 0 || apiKeyIndex >= total) {
+            throw new IllegalArgumentException(
+                    "Invalid LiteShort API key index " + apiKeyIndex + " for " + total + " configured keys");
+        }
 
-        int selectedIndex = Math.floorMod(sequence, total);
-
-        return new ApiKeySelection(configuredKeys.get(selectedIndex), selectedIndex + 1, total);
+        return new ApiKeySelection(
+                configuredKeys.get(apiKeyIndex),
+                apiKeyIndex + 1,
+                total
+        );
     }
 
     private String extractShortUrl(Map<String, Object> response) {

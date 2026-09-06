@@ -10,7 +10,7 @@ public enum RewardLinkProviderType {
     LITESHORT("LITESHORT", "LITESHORT_TELEGRAM", "LiteShort");
 
     /**
-     * Value used by reward.trial.link-provider.
+     * Value used by reward.trial.link-providers.
      */
     private final String configValue;
 

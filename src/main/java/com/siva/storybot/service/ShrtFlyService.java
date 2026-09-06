@@ -8,14 +8,15 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.core.annotation.Order;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.net.URI;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Service
+@Order(20)
 @RequiredArgsConstructor
 public class ShrtFlyService implements RewardLinkProvider {
 
@@ -27,13 +28,6 @@ public class ShrtFlyService implements RewardLinkProvider {
     // =========================================================
     // SHRTFLY CONFIGURATION
     // =========================================================
-    /**
-     * In-memory round-robin counter.
-     * <p>
-     * Application restart:
-     * Counter starts again from API key slot 1.
-     */
-    private final AtomicInteger nextApiKeyIndex = new AtomicInteger(0);
     @Value("${reward.trial.shrtfly.api-url:https://shrtfly.com/api}")
     private String apiUrl;
     /**
@@ -44,13 +38,8 @@ public class ShrtFlyService implements RewardLinkProvider {
      * reward.trial.shrtfly.api-keys=
      * ${SHRTFLY_API_KEYS:key1,key2,key3}
      * <p>
-     * Rotation:
-     * <p>
-     * Link 1 -> key1
-     * Link 2 -> key2
-     * Link 3 -> key3
-     * Link 4 -> key1
-     * Link 5 -> key2
+     * RewardLinkProviderResolver owns rotation and explicitly selects the
+     * key index for this provider.
      */
     @Value("${reward.trial.shrtfly.api-keys:}")
     private String apiKeys;
@@ -199,13 +188,14 @@ public class ShrtFlyService implements RewardLinkProvider {
     // COMMON HELPERS
     // =========================================================
 
+    @Override
     public int getConfiguredApiKeyCount() {
 
         return getConfiguredApiKeys().size();
     }
 
     @Override
-    public String shorten(String destinationUrl) {
+    public String shorten(String destinationUrl, int apiKeyIndex) {
 
         // -----------------------------------------------------
         // Destination validation
@@ -233,10 +223,10 @@ public class ShrtFlyService implements RewardLinkProvider {
         }
 
         // -----------------------------------------------------
-        // Round-robin API key
+        // Select the exact API key requested by the central resolver
         // -----------------------------------------------------
 
-        ApiKeySelection keySelection = selectApiKey(configuredKeys);
+        ApiKeySelection keySelection = selectApiKey(configuredKeys, apiKeyIndex);
 
         // -----------------------------------------------------
         // API endpoint
@@ -389,28 +379,24 @@ public class ShrtFlyService implements RewardLinkProvider {
         return new ArrayList<>(uniqueKeys);
     }
 
-    private ApiKeySelection selectApiKey(List<String> configuredKeys) {
+    private ApiKeySelection selectApiKey(List<String> configuredKeys, int apiKeyIndex) {
 
         int total = configuredKeys.size();
 
         if (total <= 0) {
-
             throw new IllegalStateException("No ShrtFly API keys are configured");
         }
 
-        /*
-         * Thread-safe round robin:
-         *
-         * 0 -> key1
-         * 1 -> key2
-         * 2 -> key3
-         * 3 -> key1
-         */
-        int sequence = nextApiKeyIndex.getAndIncrement();
+        if (apiKeyIndex < 0 || apiKeyIndex >= total) {
+            throw new IllegalArgumentException(
+                    "Invalid ShrtFly API key index " + apiKeyIndex + " for " + total + " configured keys");
+        }
 
-        int selectedIndex = Math.floorMod(sequence, total);
-
-        return new ApiKeySelection(configuredKeys.get(selectedIndex), selectedIndex + 1, total);
+        return new ApiKeySelection(
+                configuredKeys.get(apiKeyIndex),
+                apiKeyIndex + 1,
+                total
+        );
     }
 
     private record ApiKeySelection(String apiKey, int slotNumber, int totalKeys) {

@@ -47,7 +47,10 @@ public class RewardTrialService {
 
     public boolean isEnabled() {
 
-        return enabled && providerApproved && providerResolver.isCurrentProviderConfigured() && !getBotUsername().isBlank();
+        return enabled
+                && providerApproved
+                && providerResolver.hasConfiguredProvider()
+                && !getBotUsername().isBlank();
     }
 
     /**
@@ -84,12 +87,6 @@ public class RewardTrialService {
             throw new IllegalStateException("Reward trial is available only for normal users");
         }
 
-        RewardLinkProvider linkProvider = providerResolver.getCurrentProvider();
-
-        RewardLinkProviderType providerType = linkProvider.getProviderType();
-
-        String providerDatabaseValue = providerType.getDatabaseValue();
-
         LocalDateTime now = LocalDateTime.now();
 
         // -----------------------------------------------------
@@ -99,111 +96,136 @@ public class RewardTrialService {
         Optional<RewardTrial> active = getActiveRewardTrial(user);
 
         if (active.isPresent()) {
-
-            throw new IllegalStateException("Reward access already active until " + active.get().getExpiresAt());
+            throw new IllegalStateException(
+                    "Reward access already active until " + active.get().getExpiresAt());
         }
 
         // -----------------------------------------------------
-        // Check ALL pending rows
+        // Reuse ANY valid pending link, regardless of provider.
         //
-        // Important during provider switching:
-        //
-        // SHRTFLY pending link must NOT be destroyed simply
-        // because current provider becomes LITESHORT.
+        // This is important with round-robin. A user pressing the
+        // reward button repeatedly must not create LITESHORT and
+        // SHRTFLY pending links at the same time.
         // -----------------------------------------------------
 
-        List<RewardTrial> pendingRows = rewardTrialRepository.findAllByTelegramUserAndStatusOrderByCreatedAtDesc(user, RewardTrialStatus.PENDING);
+        List<RewardTrial> pendingRows =
+                rewardTrialRepository.findAllByTelegramUserAndStatusOrderByCreatedAtDesc(
+                        user, RewardTrialStatus.PENDING);
+
+        RewardTrial reusablePending = null;
 
         for (RewardTrial pending : pendingRows) {
 
-            boolean linkStillValid = pending.getLinkExpiresAt() != null && now.isBefore(pending.getLinkExpiresAt());
+            boolean linkStillValid = pending.getLinkExpiresAt() != null
+                    && now.isBefore(pending.getLinkExpiresAt());
 
-            boolean shortUrlAvailable = pending.getShortUrl() != null && !pending.getShortUrl().isBlank();
+            boolean shortUrlAvailable = pending.getShortUrl() != null
+                    && !pending.getShortUrl().isBlank();
 
-            String rowProvider = pending.getProvider() == null ? "" : pending.getProvider().trim();
-
-            boolean sameProvider = providerDatabaseValue.equalsIgnoreCase(rowProvider);
-
-            /*
-             * Reuse only a pending link created by the
-             * CURRENT provider.
-             */
-            if (sameProvider && linkStillValid && shortUrlAvailable) {
-
-                log.info("Reusing pending reward link " + "provider={} " + "telegramId={} " + "rewardTrialId={} " + "linkExpiresAt={}", providerType, user.getTelegramId(), pending.getId(), pending.getLinkExpiresAt());
-
-                return new RewardLinkResult(pending.getShortUrl(), pending.getLinkExpiresAt());
+            if (linkStillValid && shortUrlAvailable && reusablePending == null) {
+                reusablePending = pending;
+                continue;
             }
 
-            /*
-             * Any genuinely expired/invalid pending row
-             * can be expired.
-             *
-             * But a valid row belonging to ANOTHER provider
-             * is left untouched so its existing URL can
-             * still be completed by the user.
-             */
-            if (!linkStillValid || !shortUrlAvailable) {
+            // Expire invalid rows and defensive duplicate valid pending rows.
+            pending.setStatus(RewardTrialStatus.EXPIRED);
+            pending.setUpdatedAt(now);
+            rewardTrialRepository.save(pending);
+        }
 
-                pending.setStatus(RewardTrialStatus.EXPIRED);
+        if (reusablePending != null) {
+            log.info(
+                    "Reusing pending reward link provider={} telegramId={} rewardTrialId={} linkExpiresAt={}",
+                    reusablePending.getProvider(),
+                    user.getTelegramId(),
+                    reusablePending.getId(),
+                    reusablePending.getLinkExpiresAt()
+            );
 
-                pending.setUpdatedAt(now);
-
-                rewardTrialRepository.save(pending);
-            }
+            return new RewardLinkResult(
+                    reusablePending.getShortUrl(),
+                    reusablePending.getLinkExpiresAt()
+            );
         }
 
         // -----------------------------------------------------
-        // Generate new token
+        // Provider-first + key-first-within-provider rotation.
+        //
+        // Example with 2 keys each:
+        // LITESHORT[key1] -> LITESHORT[key2] ->
+        // SHRTFLY[key1]   -> SHRTFLY[key2]   -> repeat.
+        //
+        // Resolver owns the complete rotation + provider failover.
+        // -----------------------------------------------------
+
+        RewardLinkProviderType initialProviderType =
+                providerResolver.getDefaultProviderType();
+
+        // -----------------------------------------------------
+        // Generate token + pending DB row
         // -----------------------------------------------------
 
         String token = newToken();
-
         LocalDateTime linkExpiresAt = now.plusMinutes(REWARD_LINK_MINUTES);
 
-        RewardTrial rewardTrial = RewardTrial.builder().telegramUser(user).token(token).status(RewardTrialStatus.PENDING).provider(providerDatabaseValue).createdAt(now).updatedAt(now).linkExpiresAt(linkExpiresAt).build();
+        RewardTrial rewardTrial = RewardTrial.builder()
+                .telegramUser(user)
+                .token(token)
+                .status(RewardTrialStatus.PENDING)
+                .provider(initialProviderType.getDatabaseValue())
+                .createdAt(now)
+                .updatedAt(now)
+                .linkExpiresAt(linkExpiresAt)
+                .build();
 
         rewardTrial = rewardTrialRepository.save(rewardTrial);
 
-        // -----------------------------------------------------
-        // Provider generates monetized short URL
-        // -----------------------------------------------------
+        String telegramDestination = buildTelegramClaimUrl(token);
+
+        RewardLinkProviderResolver.ShortenResult result;
 
         try {
-
-            String telegramDestination = buildTelegramClaimUrl(token);
-
-            log.info("Creating reward link " + "provider={} " + "telegramId={} " + "rewardTrialId={} " + "destinationBot={}", providerType, user.getTelegramId(), rewardTrial.getId(), getBotUsername());
-
-            String shortUrl = linkProvider.shorten(telegramDestination);
-
-            if (shortUrl == null || shortUrl.isBlank()) {
-
-                throw new IllegalStateException(providerType + " returned an empty short URL");
-            }
-
-            rewardTrial.setShortUrl(shortUrl);
-
-            rewardTrial.setUpdatedAt(LocalDateTime.now());
-
-            rewardTrialRepository.save(rewardTrial);
-
-            log.info("Direct Telegram reward link created " + "provider={} " + "telegramId={} " + "rewardTrialId={} " + "linkExpiresAt={}", providerType, user.getTelegramId(), rewardTrial.getId(), linkExpiresAt);
-
-            return new RewardLinkResult(shortUrl, linkExpiresAt);
-
+            result = providerResolver.shortenWithFailover(telegramDestination);
         } catch (RuntimeException ex) {
-
+            // Only provider/API failures reach this branch.
             rewardTrial.setStatus(RewardTrialStatus.FAILED);
-
             rewardTrial.setUpdatedAt(LocalDateTime.now());
-
             rewardTrialRepository.save(rewardTrial);
 
-            log.error("Unable to create reward link " + "provider={} " + "telegramId={} " + "rewardTrialId={}", providerType, user.getTelegramId(), rewardTrial.getId(), ex);
+            log.error(
+                    "Unable to create reward link using all configured provider/API-key combinations telegramId={} rewardTrialId={}",
+                    user.getTelegramId(),
+                    rewardTrial.getId(),
+                    ex
+            );
 
             throw ex;
         }
+
+        // The provider API succeeded. Persist the actual provider and URL.
+        // IMPORTANT: keep this DB save OUTSIDE the provider-failure catch.
+        // If DB persistence fails, we must not call another provider and create
+        // another external short URL for the same reward token.
+        rewardTrial.setProvider(result.providerType().getDatabaseValue());
+        rewardTrial.setShortUrl(result.shortUrl());
+        rewardTrial.setUpdatedAt(LocalDateTime.now());
+
+        rewardTrialRepository.save(rewardTrial);
+
+        log.info(
+                "Direct Telegram reward link created provider={} apiKeySlot={}/{} telegramId={} rewardTrialId={} linkExpiresAt={}",
+                result.providerType(),
+                result.apiKeySlotNumber(),
+                result.providerApiKeyCount(),
+                user.getTelegramId(),
+                rewardTrial.getId(),
+                linkExpiresAt
+        );
+
+        return new RewardLinkResult(
+                result.shortUrl(),
+                linkExpiresAt
+        );
     }
 
     @Transactional
@@ -506,11 +528,10 @@ public class RewardTrialService {
             throw new IllegalStateException("Reward provider approval is required before enabling incentivized traffic");
         }
 
-        RewardLinkProvider provider = providerResolver.getCurrentProvider();
+        if (!providerResolver.hasConfiguredProvider()) {
 
-        if (!provider.isConfigured()) {
-
-            throw new IllegalStateException(provider.getProviderType() + " reward provider is not configured");
+            throw new IllegalStateException(
+                    "No configured reward provider/API-key combinations are available");
         }
 
         if (getBotUsername().isBlank()) {
