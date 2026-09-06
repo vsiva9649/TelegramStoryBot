@@ -1279,6 +1279,66 @@ public class TelegramService {
                 return;
             }
 
+            if (data.startsWith("storyaccess_all_")) {
+
+                // UI also shows this button only to OWNER, but the callback
+                // itself must enforce OWNER-only access as well.
+                if (user.getRole() != UserRole.OWNER) {
+                    sendMessage(bot, chatId, "❌ Only OWNER can grant access to all stories.");
+                    return;
+                }
+
+                String payload = data.replace("storyaccess_all_", "");
+                String[] split = payload.split("_");
+
+                if (split.length < 2 || split.length > 3) {
+                    sendMessage(bot, chatId, "❌ Invalid all-stories access action.");
+                    return;
+                }
+
+                Long targetTelegramId = Long.parseLong(split[0]);
+                int page = Integer.parseInt(split[1]);
+                Integer returnUsersPage = split.length == 3
+                        ? Integer.parseInt(split[2])
+                        : null;
+
+                TelegramUser targetUser = telegramUserService.getUserByTelegramId(targetTelegramId);
+
+                if (targetUser == null) {
+                    sendMessage(bot, chatId, "❌ User not found.");
+                    return;
+                }
+
+                try {
+                    int newlyGranted = storyAccessService.grantAllActiveStories(user, targetUser);
+
+                    String displayUser = targetUser.getUsername() == null || targetUser.getUsername().isBlank()
+                            ? String.valueOf(targetUser.getTelegramId())
+                            : "@" + targetUser.getUsername();
+
+                    String resultMessage = newlyGranted > 0
+                            ? "✅ Access granted to all active stories → " + displayUser
+                                    + "\n📚 Newly granted: " + newlyGranted
+                            : "ℹ️ " + displayUser + " already has access to all active stories.";
+
+                    sendMessage(bot, chatId, resultMessage);
+
+                    showStoryAccessManagement(
+                            bot,
+                            chatId,
+                            user,
+                            targetTelegramId,
+                            page,
+                            returnUsersPage,
+                            messageId);
+
+                } catch (SecurityException | IllegalArgumentException ex) {
+                    sendMessage(bot, chatId, "❌ " + ex.getMessage());
+                }
+
+                return;
+            }
+
             if (data.startsWith("storyaccess_toggle_")) {
 
                 if (!isAdminOrOwner(user)) {
@@ -4691,7 +4751,31 @@ public class TelegramService {
 
         builder.append("Tap a story to grant/revoke access.\n");
 
+        if (actor.getRole() == UserRole.OWNER) {
+            builder.append("✅ Or use Access All Stories to grant every active story.\n");
+        }
+
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        // OWNER-only bulk grant button. ADMIN keeps the existing per-story
+        // controls and never receives this action.
+        if (actor.getRole() == UserRole.OWNER) {
+            InlineKeyboardButton accessAllStories = new InlineKeyboardButton();
+            accessAllStories.setText("✅ Access All Stories");
+
+            String accessAllCallback =
+                    "storyaccess_all_"
+                            + targetUser.getTelegramId()
+                            + "_"
+                            + stories.getNumber();
+
+            if (returnUsersPage != null) {
+                accessAllCallback += "_" + returnUsersPage;
+            }
+
+            accessAllStories.setCallbackData(accessAllCallback);
+            rows.add(List.of(accessAllStories));
+        }
 
         for (Story story : stories) {
 

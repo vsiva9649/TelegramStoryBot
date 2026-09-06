@@ -336,6 +336,54 @@ public class StoryAccessService {
         return true;
     }
 
+    /**
+     * OWNER-only bulk action used by the Telegram story-access screen.
+     * Grants every currently active story to the selected ADMIN/USER.
+     *
+     * This is intentionally not available to ADMIN because ADMIN story
+     * assignment must stay limited to stories explicitly granted by OWNER.
+     */
+    @Transactional
+    public int grantAllActiveStories(
+            TelegramUser actor,
+            TelegramUser targetUser) {
+
+        if (!isOwner(actor)) {
+            throw new SecurityException("Only OWNER can grant all stories");
+        }
+
+        if (targetUser == null) {
+            throw new IllegalArgumentException("Target user is required");
+        }
+
+        if (targetUser.getRole() == UserRole.OWNER) {
+            throw new IllegalArgumentException("OWNER does not require story mapping");
+        }
+
+        List<Story> activeStories = storyRepository.findByActiveTrueOrderByIdDesc();
+        int newlyGranted = 0;
+
+        for (Story story : activeStories) {
+            boolean alreadyAssigned = hasAssignedStoryAccess(targetUser, story);
+
+            grantStoryAccess(actor, targetUser, story);
+
+            if (!alreadyAssigned) {
+                newlyGranted++;
+            }
+        }
+
+        log.info(
+                "All active story access granted actor={} target={} targetRole={} totalActive={} newlyGranted={}",
+                actor.getTelegramId(),
+                targetUser.getTelegramId(),
+                targetUser.getRole(),
+                activeStories.size(),
+                newlyGranted);
+
+        return newlyGranted;
+    }
+
     // =========================================
     // PERMISSION VALIDATION
     // =========================================

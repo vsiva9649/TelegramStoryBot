@@ -20,6 +20,8 @@ public interface StoryRepository extends JpaRepository<Story, Long> {
 
     Page<Story> findByActiveTrue(Pageable pageable);
 
+    List<Story> findByActiveTrueOrderByIdDesc();
+
     @Query("""
             SELECT s
             FROM Story s
